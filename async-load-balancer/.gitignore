@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# Environment
+.env
+
+# Results (keep directory structure via .gitkeep, ignore generated data)
+results/raw/*
+results/plots/*
+!results/raw/.gitkeep
+!results/plots/.gitkeep

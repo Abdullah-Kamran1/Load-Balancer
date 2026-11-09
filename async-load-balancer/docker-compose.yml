@@ -1,0 +1,82 @@
+# Phase 1: backend farm with intentionally unequal capacities.
+#
+# Capacity per backend = artificial delay + concurrency limit:
+#   backend-1: fast   ( 25 ms delay, 16 concurrent slots)
+#   backend-2: medium (100 ms delay,  8 concurrent slots)
+#   backend-3: slow   (300 ms delay,  4 concurrent slots)
+#   backend-4: mixed  ( 50 ms delay,  6 concurrent slots)
+#
+# All backends serve identical URLs (/ / /health /work /stats); capacity
+# differences come only from configuration.
+
+x-backend-common: &backend-common
+  build: ./backend
+  networks:
+    - lb-net
+  expose:
+    - "8000"
+
+services:
+  backend-1:
+    <<: *backend-common
+    container_name: lb-backend-1
+    environment:
+      BACKEND_ID: backend-1
+      DEFAULT_WORK_DELAY_MS: "25"
+      MAX_CONCURRENCY: "16"
+    ports:
+      - "8001:8000"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\""]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+
+  backend-2:
+    <<: *backend-common
+    container_name: lb-backend-2
+    environment:
+      BACKEND_ID: backend-2
+      DEFAULT_WORK_DELAY_MS: "100"
+      MAX_CONCURRENCY: "8"
+    ports:
+      - "8002:8000"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\""]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+
+  backend-3:
+    <<: *backend-common
+    container_name: lb-backend-3
+    environment:
+      BACKEND_ID: backend-3
+      DEFAULT_WORK_DELAY_MS: "300"
+      MAX_CONCURRENCY: "4"
+    ports:
+      - "8003:8000"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\""]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+
+  backend-4:
+    <<: *backend-common
+    container_name: lb-backend-4
+    environment:
+      BACKEND_ID: backend-4
+      DEFAULT_WORK_DELAY_MS: "50"
+      MAX_CONCURRENCY: "6"
+    ports:
+      - "8004:8000"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\""]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+
+networks:
+  lb-net:
+    driver: bridge

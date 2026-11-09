@@ -1,0 +1,4 @@
+# Local development and testing dependencies (the proxy runs on the host)
+h11
+pytest
+pytest-asyncio
