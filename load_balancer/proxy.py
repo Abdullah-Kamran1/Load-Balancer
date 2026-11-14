@@ -169,6 +169,13 @@ class ProxyServer:
                 backend.backend_id if backend else None,
                 status,
                 duration_ms,
+                extra={
+                    "request": request_id,
+                    "client": client_ip,
+                    "backend": backend.backend_id if backend else None,
+                    "status": status,
+                    "duration_ms": duration_ms,
+                },
             )
             try:
                 writer.close()
