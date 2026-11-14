@@ -13,3 +13,6 @@ results/raw/*
 results/plots/*
 !results/raw/.gitkeep
 !results/plots/.gitkeep
+
+# Project Plan
+load_balancer_project_plan.md
