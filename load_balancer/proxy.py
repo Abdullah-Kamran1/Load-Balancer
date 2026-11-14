@@ -49,27 +49,50 @@ HOP_BY_HOP = {
 }
 
 
-def upstream_headers(request: HttpRequest, backend_netloc: str) -> list[tuple[bytes, bytes]]:
-    """Build the headers to send upstream: strip hop-by-hop headers and any
-    header named by the client's Connection header; rewrite Host."""
-    connection_named = set()
-    conn_header = request.header("connection")
-    if conn_header:
-        for token in conn_header.split(b","):
-            name = token.strip().lower()
-            if name:
-                connection_named.add(name)
-
+def filter_headers(
+    headers: list[tuple[bytes, bytes]],
+    connection_named: set[bytes],
+    drop_host: bool = False,
+) -> list[tuple[bytes, bytes]]:
+    """Drop hop-by-hop headers, headers named by the message's Connection
+    header, and optionally Host."""
     out = []
-    for name, value in request.raw_headers:
+    for name, value in headers:
         lowered = name.lower()
         if lowered in HOP_BY_HOP or lowered in connection_named:
             continue
-        if lowered == b"host":
+        if drop_host and lowered == b"host":
             continue
         out.append((name, value))
+    return out
+
+
+def connection_named_by(header_value: bytes | None) -> set[bytes]:
+    """Header names listed in a Connection header (lowercased)."""
+    named = set()
+    if header_value:
+        for token in header_value.split(b","):
+            name = token.strip().lower()
+            if name:
+                named.add(name)
+    return named
+
+
+def upstream_headers(request: HttpRequest, backend_netloc: str) -> list[tuple[bytes, bytes]]:
+    """Build the headers to send upstream: strip hop-by-hop headers and any
+    header named by the client's Connection header; rewrite Host."""
+    out = filter_headers(request.raw_headers, connection_named_by(request.header("connection")), drop_host=True)
     out.append((b"host", backend_netloc.encode("ascii")))
     return out
+
+
+def downstream_headers(response_headers: list[tuple[bytes, bytes]]) -> list[tuple[bytes, bytes]]:
+    """Strip hop-by-hop headers (and Connection-named ones) from upstream
+    response headers before sending them to the client."""
+    connection_header = next(
+        (v for k, v in response_headers if k.lower() == b"connection"), None
+    )
+    return filter_headers(response_headers, connection_named_by(connection_header))
 
 
 class ProxyServer:
@@ -81,6 +104,7 @@ class ProxyServer:
         port: int = 0,
         connect_timeout: float = 5.0,
         request_timeout: float = 30.0,
+        write_timeout: float = 30.0,
         max_body_bytes: int = 10 * 1024 * 1024,
     ) -> None:
         self._registry = registry
@@ -89,6 +113,7 @@ class ProxyServer:
         self._port = port
         self._connect_timeout = connect_timeout
         self._request_timeout = request_timeout
+        self._write_timeout = write_timeout
         self._max_body_bytes = max_body_bytes
         self._server: asyncio.AbstractServer | None = None
         self._request_seq = 0
@@ -215,13 +240,19 @@ class ProxyServer:
                 self.counters["responses_5xx"] += 1
                 await self._write_error(writer, 502, f"backend {backend.backend_id} timeout")
                 return 502
-            except (h11.RemoteProtocolError, ConnectionError):
+            except BodyTooLargeError:
+                self.counters["responses_5xx"] += 1
+                await self._write_error(
+                    writer, 502, f"backend {backend.backend_id} response too large"
+                )
+                return 502
+            except (h11.RemoteProtocolError, h11.LocalProtocolError, ConnectionError):
                 self.counters["responses_5xx"] += 1
                 await self._write_error(writer, 502, f"backend {backend.backend_id} bad response")
                 return 502
 
-            writer.write(serialize_response(status, list(headers.items()), body))
-            await writer.drain()
+            writer.write(serialize_response(status, downstream_headers(headers), body))
+            await self._drain_client(writer)
             return status
         except (ConnectionError, OSError):
             # Client went away mid-flight; nothing to report to it.
@@ -235,6 +266,16 @@ class ProxyServer:
                     await upstream_writer.wait_closed()
                 except (ConnectionError, OSError):
                     pass
+
+    async def _drain_client(self, writer: asyncio.StreamWriter) -> None:
+        """Drain the client write buffer, bounded by write_timeout.
+
+        A client that stops reading (stalled socket buffer) must not hold
+        the backend slot, the upstream socket, and this handler forever.
+        The TimeoutError propagates to the caller's error handling, which
+        releases everything in its finally blocks.
+        """
+        await asyncio.wait_for(writer.drain(), self._write_timeout)
 
     async def _write_error(self, writer: asyncio.StreamWriter, status: int, message: str) -> None:
         try:

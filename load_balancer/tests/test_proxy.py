@@ -34,7 +34,7 @@ async def get_through(proxy_port: int, target: str = "/", method: str = "GET", b
         status, headers, resp_body = await asyncio.wait_for(
             read_response(reader, 10 * 1024 * 1024), 10
         )
-        return status, resp_body, {k.decode(): v.decode() for k, v in headers.items()}
+        return status, resp_body, {k.decode(): v.decode() for k, v in headers}
     finally:
         writer.close()
         try:
@@ -119,6 +119,36 @@ class TestFailurePaths:
             status, body, _ = await get_through(proxy.port)
             assert status == 200
             assert body == backend.response_body
+
+    async def test_response_hop_by_hop_headers_are_stripped(self, fake_backend_factory):
+        backend = await fake_backend_factory(
+            response_headers=[
+                (b"content-type", b"text/plain"),
+                (b"connection", b"close, keep-alive-secret"),
+                (b"keep-alive", b"timeout=5"),
+                (b"keep-alive-secret", b"must-not-forward"),
+                (b"x-visible", b"yes"),
+            ]
+        )
+        registry = registry_of(backend)
+        proxy = ProxyServer(registry=registry, strategy=RoundRobinStrategy())
+        async with await proxy.start():
+            status, body, headers = await get_through(proxy.port)
+            assert status == 200
+            lowered = {k.lower(): v for k, v in headers.items()}
+            assert lowered.get("connection") is None
+            assert lowered.get("keep-alive") is None
+            assert lowered.get("keep-alive-secret") is None
+            assert lowered.get("x-visible") == "yes"
+
+    async def test_oversized_upstream_response_returns_502(self, fake_backend_factory):
+        big = await fake_backend_factory(response_body=b"x" * 4096)
+        registry = registry_of(big)
+        proxy = ProxyServer(registry=registry, strategy=RoundRobinStrategy(), max_body_bytes=1024)
+        async with await proxy.start():
+            status, body, _ = await get_through(proxy.port)
+            assert status == 502
+            assert b"too large" in body.lower()
 
     async def test_active_requests_released_on_upstream_failure(self, fake_backend_factory):
         backend = await fake_backend_factory()

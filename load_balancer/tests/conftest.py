@@ -21,9 +21,18 @@ if sys.platform == "win32":
 
 
 class FakeBackend:
-    def __init__(self, response_body: bytes = b'{"backend_id": "stub"}', status: int = 200):
+    def __init__(
+        self,
+        response_body: bytes = b'{"backend_id": "stub"}',
+        status: int = 200,
+        response_headers: list[tuple[bytes, bytes]] | None = None,
+    ):
         self.response_body = response_body
         self.status = status
+        self.response_headers = response_headers or [
+            (b"content-type", b"application/json"),
+            (b"x-backend", b"stub"),
+        ]
         self.requests: list[dict] = []
         self._server: asyncio.AbstractServer | None = None
         self.host = "127.0.0.1"
@@ -70,11 +79,7 @@ class FakeBackend:
                     "body": body,
                 }
             )
-            raw = serialize_response(
-                self.status,
-                [(b"content-type", b"application/json"), (b"x-backend", b"stub")],
-                self.response_body,
-            )
+            raw = serialize_response(self.status, self.response_headers, self.response_body)
             writer.write(raw)
             await writer.drain()
         finally:

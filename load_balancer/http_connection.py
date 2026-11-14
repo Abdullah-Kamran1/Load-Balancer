@@ -93,14 +93,15 @@ async def read_request(
 
 async def read_response(
     reader: asyncio.StreamReader, max_body_bytes: int
-) -> tuple[int, dict[bytes, bytes], bytes]:
+) -> tuple[int, list[tuple[bytes, bytes]], bytes]:
     """Read one HTTP/1.1 response from an upstream connection.
 
-    Returns (status_code, headers-as-lowercase-bytes-dict, body).
+    Returns (status_code, headers-as-lowercased-tuples, body). Header
+    duplicates are preserved (e.g. multiple Set-Cookie).
     """
     conn = h11.Connection(our_role=h11.CLIENT)
     response: h11.Response | None = None
-    headers: dict[bytes, bytes] = {}
+    headers: list[tuple[bytes, bytes]] = []
     body = bytearray()
 
     while True:
@@ -111,14 +112,15 @@ async def read_response(
                 # EOF: let h11 finish read-until-close framing before
                 # declaring the connection broken.
                 conn.receive_data(b"")
-                if conn.next_event() is h11.EndOfMessage and response is not None:
-                    break
+                event = conn.next_event()
+                if isinstance(event, h11.EndOfMessage) and response is not None:
+                    return response.status_code, headers, bytes(body)
                 raise h11.RemoteProtocolError("connection closed mid-response")
             conn.receive_data(data)
             continue
         if isinstance(event, h11.Response):
             response = event
-            headers = {k.lower(): v for k, v in event.headers}
+            headers = [(k.lower(), v) for k, v in event.headers]
         elif isinstance(event, h11.Data):
             body += event.data
             if len(body) > max_body_bytes:

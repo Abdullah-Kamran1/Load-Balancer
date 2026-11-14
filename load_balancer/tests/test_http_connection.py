@@ -61,8 +61,37 @@ class TestReadResponse:
         reader = make_reader(raw)
         status, headers, body = await read_response(reader, max_body_bytes=1024)
         assert status == 200
-        assert headers[b"content-type"] == b"application/json"
+        assert dict(headers)[b"content-type"] == b"application/json"
         assert body == b'{"ok": true}'
+
+    async def test_parses_read_until_close_response(self):
+        """A response with no Content-Length/TE is framed by connection close."""
+        conn = h11.Connection(our_role=h11.SERVER)
+        raw = conn.send(h11.Response(status_code=200, headers=[(b"content-type", b"text/plain")]))
+        raw += conn.send(h11.Data(data=b"streaming body"))
+        raw += conn.send(h11.EndOfMessage())
+        assert b"content-length" not in raw.lower()  # genuinely close-framed
+        reader = make_reader(raw)
+        status, headers, body = await read_response(reader, max_body_bytes=1024)
+        assert status == 200
+        assert body == b"streaming body"
+
+    async def test_duplicate_headers_are_preserved(self):
+        conn = h11.Connection(our_role=h11.SERVER)
+        raw = conn.send(
+            h11.Response(
+                status_code=200,
+                headers=[
+                    (b"set-cookie", b"a=1"),
+                    (b"set-cookie", b"b=2"),
+                ],
+            )
+        )
+        raw += conn.send(h11.EndOfMessage())
+        reader = make_reader(raw)
+        status, headers, body = await read_response(reader, max_body_bytes=1024)
+        cookies = [v for (k, v) in headers if k == b"set-cookie"]
+        assert cookies == [b"a=1", b"b=2"]
 
     async def test_body_over_cap_raises(self):
         conn = h11.Connection(our_role=h11.SERVER)
