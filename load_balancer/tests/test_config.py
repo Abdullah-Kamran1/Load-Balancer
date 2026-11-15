@@ -34,6 +34,18 @@ class TestStrategyWiring:
         cfg = load_config({"LB_STRATEGY": "round_robin"})
         assert isinstance(cfg.strategy, RoundRobinStrategy)
 
+    def test_least_active_requests_selected_by_name(self):
+        from load_balancer.algorithms.least_active import LeastActiveRequestsStrategy
+
+        cfg = load_config({"LB_STRATEGY": "least_active_requests"})
+        assert isinstance(cfg.strategy, LeastActiveRequestsStrategy)
+
+    def test_ip_hash_selected_by_name(self):
+        from load_balancer.algorithms.ip_hash import IpHashStrategy
+
+        cfg = load_config({"LB_STRATEGY": "ip_hash"})
+        assert isinstance(cfg.strategy, IpHashStrategy)
+
     def test_unknown_strategy_raises(self):
         with pytest.raises(ValueError):
             load_config({"LB_STRATEGY": "magic_algorithm"})

@@ -320,6 +320,103 @@ class TestReviewFixes:
                     pass
 
 
+class TestStrategyIntegration:
+    """Phase 4 Task 4: strategies driven through the running proxy."""
+
+    async def test_least_active_routes_around_in_flight_request(
+        self, fake_backend_factory
+    ):
+        from load_balancer.algorithms.least_active import LeastActiveRequestsStrategy
+
+        slow = await fake_backend_factory(response_body=b"slow", delay_ms=400)
+        idle = await fake_backend_factory(response_body=b"idle")
+        registry = registry_of(slow, idle)
+        proxy = ProxyServer(
+            registry=registry, strategy=LeastActiveRequestsStrategy()
+        )
+        async with await proxy.start():
+            # Request 1: ties broken toward the first backend (slow), and it
+            # holds slow.active_requests at 1 while in flight.
+            r1, w1 = await asyncio.open_connection("127.0.0.1", proxy.port)
+            w1.write(serialize_request("GET", "/", [(b"host", b"t")], b""))
+            await w1.drain()
+            await asyncio.sleep(0.1)  # let it be assigned to `slow`
+            backend_state = {b.backend_id: b for b in registry.backends()}
+            assert backend_state["backend-1"].active_requests == 1
+            # Request 2 on a fresh connection must avoid the busy backend.
+            status2, body2, _ = await get_through(proxy.port)
+            assert body2 == b"idle"
+            # Request 1 completes from the slow backend.
+            status1, _, body1 = await asyncio.wait_for(
+                read_response(r1, 1 << 20), 5
+            )
+            assert body1 == b"slow"
+            w1.close()
+            try:
+                await w1.wait_closed()
+            except (ConnectionError, OSError):
+                pass
+
+    async def test_least_active_returns_to_released_backend(
+        self, fake_backend_factory
+    ):
+        from load_balancer.algorithms.least_active import LeastActiveRequestsStrategy
+
+        b1 = await fake_backend_factory(response_body=b"one")
+        b2 = await fake_backend_factory(response_body=b"two")
+        registry = registry_of(b1, b2)
+        proxy = ProxyServer(
+            registry=registry, strategy=LeastActiveRequestsStrategy()
+        )
+        async with await proxy.start():
+            # With everything idle, requests rotate over the tied pair.
+            first = await get_through(proxy.port)
+            second = await get_through(proxy.port)
+            assert {first[1], second[1]} == {b"one", b"two"}
+
+    async def test_ip_hash_is_deterministic_per_client_ip(
+        self, fake_backend_factory
+    ):
+        from load_balancer.algorithms.ip_hash import IpHashStrategy
+
+        b1 = await fake_backend_factory(response_body=b"one")
+        b2 = await fake_backend_factory(response_body=b"two")
+        registry = registry_of(b1, b2)
+        proxy = ProxyServer(registry=registry, strategy=IpHashStrategy())
+        async with await proxy.start():
+            bodies = []
+            for _ in range(5):  # 5 fresh connections, same peer IP 127.0.0.1
+                status, body, _ = await get_through(proxy.port)
+                bodies.append(body)
+            assert len(set(bodies)) == 1  # every connection hit the same backend
+
+    async def test_round_robin_alternates_on_one_keep_alive_connection(
+        self, fake_backend_factory
+    ):
+        b1 = await fake_backend_factory(response_body=b"one")
+        b2 = await fake_backend_factory(response_body=b"two")
+        registry = registry_of(b1, b2)
+        proxy = ProxyServer(registry=registry, strategy=RoundRobinStrategy())
+        async with await proxy.start():
+            reader, writer = await asyncio.open_connection("127.0.0.1", proxy.port)
+            try:
+                bodies = []
+                for _ in range(4):
+                    writer.write(serialize_request("GET", "/", [(b"host", b"t")], b""))
+                    await writer.drain()
+                    _, _, body = await asyncio.wait_for(
+                        read_response(reader, 1 << 20), 5
+                    )
+                    bodies.append(body)
+                assert bodies == [b"one", b"two", b"one", b"two"]
+            finally:
+                writer.close()
+                try:
+                    await writer.wait_closed()
+                except (ConnectionError, OSError):
+                    pass
+
+
 class TestCounterAccounting:
     async def test_backend_counters_increment_and_release(self, fake_backend_factory):
         backend = await fake_backend_factory()

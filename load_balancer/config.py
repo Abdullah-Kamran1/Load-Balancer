@@ -2,7 +2,7 @@
 
 LB_BACKENDS  — comma-separated `backend_id:host:port` entries
 LB_PROXY_HOST / LB_PROXY_PORT — the public listener (default 127.0.0.1:8080)
-LB_STRATEGY  — round_robin (only strategy implemented in Phase 2)
+LB_STRATEGY  — round_robin | least_active_requests | ip_hash (Phase 4)
 
 Malformed values fail fast at startup rather than misroute traffic later.
 """
@@ -53,7 +53,17 @@ def parse_backends(raw: str) -> list[Backend]:
 
 def _strategy_by_name(name: str) -> LoadBalancingStrategy:
     if name == "round_robin":
+        from .algorithms.round_robin import RoundRobinStrategy
+
         return RoundRobinStrategy()
+    if name == "least_active_requests":
+        from .algorithms.least_active import LeastActiveRequestsStrategy
+
+        return LeastActiveRequestsStrategy()
+    if name == "ip_hash":
+        from .algorithms.ip_hash import IpHashStrategy
+
+        return IpHashStrategy()
     raise ValueError(f"unknown LB_STRATEGY: {name!r}")
 
 

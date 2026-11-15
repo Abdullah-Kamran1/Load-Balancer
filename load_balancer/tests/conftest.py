@@ -26,9 +26,11 @@ class FakeBackend:
         response_body: bytes = b'{"backend_id": "stub"}',
         status: int = 200,
         response_headers: list[tuple[bytes, bytes]] | None = None,
+        delay_ms: int = 0,
     ):
         self.response_body = response_body
         self.status = status
+        self.delay_ms = delay_ms
         self.response_headers = response_headers or [
             (b"content-type", b"application/json"),
             (b"x-backend", b"stub"),
@@ -79,6 +81,8 @@ class FakeBackend:
                     "body": body,
                 }
             )
+            if self.delay_ms:
+                await asyncio.sleep(self.delay_ms / 1000)
             raw = serialize_response(self.status, self.response_headers, self.response_body)
             writer.write(raw)
             await writer.drain()
