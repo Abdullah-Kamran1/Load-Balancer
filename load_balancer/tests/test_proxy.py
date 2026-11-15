@@ -80,6 +80,84 @@ class TestForwarding:
             assert bodies == [b"one", b"two", b"one", b"two"]
 
 
+class TestPersistentClientConnections:
+    """Phase 3: multiple sequential requests over one client TCP connection."""
+
+    async def test_two_sequential_requests_on_one_connection_reach_two_backends(
+        self, fake_backend_factory
+    ):
+        b1 = await fake_backend_factory(response_body=b"one")
+        b2 = await fake_backend_factory(response_body=b"two")
+        registry = registry_of(b1, b2)
+        proxy = ProxyServer(registry=registry, strategy=RoundRobinStrategy())
+        async with await proxy.start():
+            reader, writer = await asyncio.open_connection("127.0.0.1", proxy.port)
+            try:
+                writer.write(serialize_request("GET", "/", [(b"host", b"t")], b""))
+                await writer.drain()
+                s1, _, body1 = await asyncio.wait_for(read_response(reader, 1 << 20), 5)
+                assert s1 == 200 and body1 == b"one"
+                # second request on the SAME socket
+                writer.write(serialize_request("GET", "/", [(b"host", b"t")], b""))
+                await writer.drain()
+                s2, _, body2 = await asyncio.wait_for(read_response(reader, 1 << 20), 5)
+                assert s2 == 200 and body2 == b"two"
+            finally:
+                writer.close()
+                try:
+                    await writer.wait_closed()
+                except (ConnectionError, OSError):
+                    pass
+            assert proxy.counters["requests_total"] == 2
+            assert proxy.counters["connections_total"] == 1
+
+    async def test_connection_close_closes_after_response(self, fake_backend_factory):
+        backend = await fake_backend_factory()
+        registry = registry_of(backend)
+        proxy = ProxyServer(registry=registry, strategy=RoundRobinStrategy())
+        async with await proxy.start():
+            reader, writer = await asyncio.open_connection("127.0.0.1", proxy.port)
+            try:
+                writer.write(
+                    serialize_request(
+                        "GET", "/", [(b"host", b"t"), (b"connection", b"close")], b""
+                    )
+                )
+                await writer.drain()
+                status, _, _ = await asyncio.wait_for(read_response(reader, 1 << 20), 5)
+                assert status == 200
+                # server must close: next read is EOF
+                tail = await asyncio.wait_for(reader.read(), 5)
+                assert tail == b""
+            finally:
+                writer.close()
+                try:
+                    await writer.wait_closed()
+                except (ConnectionError, OSError):
+                    pass
+
+    async def test_backend_counters_release_between_keep_alive_requests(
+        self, fake_backend_factory
+    ):
+        backend = await fake_backend_factory()
+        registry = registry_of(backend)
+        proxy = ProxyServer(registry=registry, strategy=RoundRobinStrategy())
+        async with await proxy.start():
+            reader, writer = await asyncio.open_connection("127.0.0.1", proxy.port)
+            try:
+                for _ in range(3):
+                    writer.write(serialize_request("GET", "/", [(b"host", b"t")], b""))
+                    await writer.drain()
+                    await asyncio.wait_for(read_response(reader, 1 << 20), 5)
+                    assert registry.backends()[0].active_requests == 0
+            finally:
+                writer.close()
+                try:
+                    await writer.wait_closed()
+                except (ConnectionError, OSError):
+                    pass
+
+
 class TestCounterAccounting:
     async def test_backend_counters_increment_and_release(self, fake_backend_factory):
         backend = await fake_backend_factory()

@@ -27,8 +27,8 @@ from .algorithms.base import LoadBalancingStrategy
 from .health.registry import BackendRegistry
 from .http_connection import (
     BodyTooLargeError,
+    HttpStreamReader,
     HttpRequest,
-    read_request,
     read_response,
     serialize_request,
     serialize_response,
@@ -117,7 +117,12 @@ class ProxyServer:
         self._max_body_bytes = max_body_bytes
         self._server: asyncio.AbstractServer | None = None
         self._request_seq = 0
-        self.counters = {"requests_total": 0, "responses_5xx": 0, "errors": 0}
+        self.counters = {
+            "requests_total": 0,
+            "connections_total": 0,
+            "responses_5xx": 0,
+            "errors": 0,
+        }
 
     @property
     def port(self) -> int:
@@ -143,73 +148,103 @@ class ProxyServer:
     # ---- connection handling -------------------------------------------------
 
     async def _handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        self._request_seq += 1
-        request_id = self._request_seq
-        self.counters["requests_total"] += 1
-        start = time.perf_counter()
         peer = writer.get_extra_info("peername")
         client_ip = peer[0] if peer else None
-        backend = None
-        status = None
+        self.counters["connections_total"] += 1
+        # One HttpStreamReader owns this connection's h11 state machine for
+        # its whole lifetime: request parsing, response serialization, and
+        # keep-alive cycling all flow through it.
+        http = HttpStreamReader(reader, self._max_body_bytes)
 
         try:
-            try:
-                request = await asyncio.wait_for(
-                    read_request(reader, self._max_body_bytes), self._request_timeout
-                )
-            except asyncio.TimeoutError:
-                request = None
-                await self._write_error(writer, 408, "request timed out")
-                status = 408
-            except BodyTooLargeError:
-                request = None
-                await self._write_error(writer, 413, "request body too large")
-                status = 413
-            except (h11.RemoteProtocolError, ValueError):
-                request = None
-                await self._write_error(writer, 400, "malformed request")
-                status = 400
+            while True:
+                self._request_seq += 1
+                request_id = self._request_seq
+                start = time.perf_counter()
+                status = None
+                backend = None
 
-            if request is not None:
+                try:
+                    request = await asyncio.wait_for(
+                        http.read_next_request(), self._request_timeout
+                    )
+                except asyncio.TimeoutError:
+                    # Idle or stalled read: close without a response (the
+                    # h11 state may be mid-request and unusable).
+                    break
+                except BodyTooLargeError:
+                    status = 413
+                    await self._write_error(writer, 413, "request body too large")
+                    break  # mid-request state: cannot continue this connection
+                except (h11.RemoteProtocolError, ValueError):
+                    status = 400
+                    await self._write_error(writer, 400, "malformed request")
+                    break  # mid-request state: cannot continue this connection
+
+                if request is None:
+                    break  # clean EOF: client closed a keep-alive connection
+
+                self.counters["requests_total"] += 1
+
                 backend = self._strategy.select_backend(
                     client_ip, self._registry.healthy_backends()
                 )
                 if backend is None:
                     status = 503
                     self.counters["responses_5xx"] += 1
-                    await self._write_error(writer, 503, "no healthy backend available")
+                    error_body = json.dumps(
+                        {"error": "no healthy backend available"}
+                    ).encode()
+                    writer.write(
+                        http.serialize_response(
+                            503, [(b"content-type", b"application/json")], error_body
+                        )
+                    )
+                    await self._drain_client(writer)
                 else:
-                    status = await self._forward(request, backend, writer)
-        except Exception:
-            # Never let an unexpected error kill the connection loop.
-            self.counters["errors"] += 1
-            logger.exception("request %s: unhandled error", request_id)
-            status = "crash-guarded"
+                    status, headers, body = await self._forward(request, backend)
+                    writer.write(
+                        http.serialize_response(status, downstream_headers(headers), body)
+                    )
+                    await self._drain_client(writer)
+
+                duration_ms = round((time.perf_counter() - start) * 1000, 2)
+                logger.info(
+                    "request=%s client=%s backend=%s status=%s duration_ms=%s",
+                    request_id,
+                    client_ip,
+                    backend.backend_id if backend else None,
+                    status,
+                    duration_ms,
+                    extra={
+                        "request": request_id,
+                        "client": client_ip,
+                        "backend": backend.backend_id if backend else None,
+                        "status": status,
+                        "duration_ms": duration_ms,
+                    },
+                )
+                if http.should_close:
+                    break
+        except (ConnectionError, OSError):
+            # Client went away; release everything via finally.
+            pass
         finally:
-            duration_ms = round((time.perf_counter() - start) * 1000, 2)
-            logger.info(
-                "request=%s client=%s backend=%s status=%s duration_ms=%s",
-                request_id,
-                client_ip,
-                backend.backend_id if backend else None,
-                status,
-                duration_ms,
-                extra={
-                    "request": request_id,
-                    "client": client_ip,
-                    "backend": backend.backend_id if backend else None,
-                    "status": status,
-                    "duration_ms": duration_ms,
-                },
-            )
             try:
                 writer.close()
                 await writer.wait_closed()
             except (ConnectionError, OSError):
                 pass
 
-    async def _forward(self, request: HttpRequest, backend, writer: asyncio.StreamWriter) -> int:
-        """Forward one request to one backend; return the response status."""
+    async def _forward(
+        self, request: HttpRequest, backend
+    ) -> tuple[int, list[tuple[bytes, bytes]], bytes]:
+        """Forward one request to one backend; return its response.
+
+        Does not touch the client socket: responses are serialized by the
+        caller through the connection's h11 state machine. Failures return
+        a synthetic 502 response instead of raising.
+        """
         backend.active_requests += 1
         backend.total_requests += 1
         upstream_writer = None
@@ -220,8 +255,9 @@ class ProxyServer:
                 )
             except (asyncio.TimeoutError, OSError):
                 self.counters["responses_5xx"] += 1
-                await self._write_error(writer, 502, f"backend {backend.backend_id} unreachable")
-                return 502
+                return 502, [], self._error_body(
+                    f"backend {backend.backend_id} unreachable"
+                )
 
             out = serialize_request(
                 request.method,
@@ -234,30 +270,28 @@ class ProxyServer:
 
             try:
                 status, headers, body = await asyncio.wait_for(
-                    read_response(upstream_reader, self._max_body_bytes), self._request_timeout
+                    read_response(upstream_reader, self._max_body_bytes),
+                    self._request_timeout,
                 )
             except asyncio.TimeoutError:
                 self.counters["responses_5xx"] += 1
-                await self._write_error(writer, 502, f"backend {backend.backend_id} timeout")
-                return 502
+                return 502, [], self._error_body(f"backend {backend.backend_id} timeout")
             except BodyTooLargeError:
                 self.counters["responses_5xx"] += 1
-                await self._write_error(
-                    writer, 502, f"backend {backend.backend_id} response too large"
+                return 502, [], self._error_body(
+                    f"backend {backend.backend_id} response too large"
                 )
-                return 502
             except (h11.RemoteProtocolError, h11.LocalProtocolError, ConnectionError):
                 self.counters["responses_5xx"] += 1
-                await self._write_error(writer, 502, f"backend {backend.backend_id} bad response")
-                return 502
+                return 502, [], self._error_body(
+                    f"backend {backend.backend_id} bad response"
+                )
 
-            writer.write(serialize_response(status, downstream_headers(headers), body))
-            await self._drain_client(writer)
-            return status
+            return status, headers, body
         except (ConnectionError, OSError):
             # Client went away mid-flight; nothing to report to it.
             self.counters["errors"] += 1
-            return 0
+            return 0, [], b""
         finally:
             backend.active_requests -= 1
             if upstream_writer is not None:
@@ -266,6 +300,24 @@ class ProxyServer:
                     await upstream_writer.wait_closed()
                 except (ConnectionError, OSError):
                     pass
+
+    def _error_body(self, message: str) -> bytes:
+        return json.dumps({"error": message}).encode()
+
+    async def _write_error(self, writer: asyncio.StreamWriter, status: int, message: str) -> None:
+        """Write an error response outside the keep-alive cycle (the h11
+        request state is unusable), then the caller closes the connection."""
+        try:
+            writer.write(
+                serialize_response(
+                    status,
+                    [(b"content-type", b"application/json")],
+                    self._error_body(message),
+                )
+            )
+            await self._drain_client(writer)
+        except (ConnectionError, OSError):
+            pass
 
     async def _drain_client(self, writer: asyncio.StreamWriter) -> None:
         """Drain the client write buffer, bounded by write_timeout.

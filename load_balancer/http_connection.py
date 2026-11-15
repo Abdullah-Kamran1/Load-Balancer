@@ -55,40 +55,110 @@ class HttpRequest:
 async def read_request(
     reader: asyncio.StreamReader, max_body_bytes: int
 ) -> HttpRequest | None:
-    """Read one HTTP/1.1 request.
+    """Read one HTTP/1.1 request (single-request semantics).
 
     Returns None if the peer closed cleanly without sending a request.
     """
-    conn = h11.Connection(our_role=h11.SERVER)
-    request: h11.Request | None = None
-    body = bytearray()
+    http = HttpStreamReader(reader, max_body_bytes)
+    return await http.read_next_request()
 
-    while True:
-        event = conn.next_event()
-        if event is h11.NEED_DATA:
-            data = await reader.read(DEFAULT_CHUNK)
-            if not data:
+
+class HttpStreamReader:
+    """Persistent server-side HTTP/1.1 reader (Phase 3 keep-alive).
+
+    Owns the h11 state machine for one client TCP connection, so multiple
+    sequential requests can be parsed from the same stream. h11 owns all
+    framing arithmetic: bodies (Content-Length or chunked) are fully
+    consumed before the next request is returned.
+
+    After each successful read, ``should_close`` says whether the client
+    wants the connection closed (Connection: close, or HTTP/1.0 without
+    keep-alive). A clean EOF between requests yields None.
+    """
+
+    def __init__(self, reader: asyncio.StreamReader, max_body_bytes: int) -> None:
+        self._reader = reader
+        self._max_body_bytes = max_body_bytes
+        self._conn = h11.Connection(our_role=h11.SERVER)
+        self._eof = False
+        self.should_close = False
+
+    async def read_next_request(self) -> HttpRequest | None:
+        request: h11.Request | None = None
+        body = bytearray()
+
+        while True:
+            event = self._conn.next_event()
+            if event is h11.NEED_DATA:
+                if self._eof:
+                    # EOF already signalled into h11 and still incomplete.
+                    if request is None:
+                        return None
+                    raise h11.RemoteProtocolError("connection closed mid-request")
+                data = await self._reader.read(DEFAULT_CHUNK)
+                if not data:
+                    # Peer closed. While idle (request is None) this is a
+                    # clean end of a keep-alive connection; mid-request it is
+                    # a protocol error. We do not call next_event() after EOF
+                    # here: at an idle state h11 answers with PAUSED forever,
+                    # which would spin this loop without ever awaiting.
+                    self._eof = True
+                    if request is None:
+                        return None
+                    raise h11.RemoteProtocolError("connection closed mid-request")
+                self._conn.receive_data(data)
+                continue
+            if isinstance(event, h11.Request):
+                request = event
+            elif isinstance(event, h11.Data):
+                body += event.data
+                if len(body) > self._max_body_bytes:
+                    raise BodyTooLargeError
+            elif isinstance(event, h11.EndOfMessage):
                 if request is None:
+                    # EOF while idle: the client closed a keep-alive connection.
                     return None
-                raise h11.RemoteProtocolError("connection closed mid-request")
-            conn.receive_data(data)
-            continue
-        if isinstance(event, h11.Request):
-            request = event
-        elif isinstance(event, h11.Data):
-            body += event.data
-            if len(body) > max_body_bytes:
-                raise BodyTooLargeError
-        elif isinstance(event, h11.EndOfMessage):
-            if request is None:
-                raise h11.RemoteProtocolError("end of message without request")
-            return HttpRequest(
-                method=request.method.decode("ascii"),
-                target=request.target.decode("ascii"),
-                http_version=request.http_version.decode("ascii"),
-                raw_headers=list(request.headers),
-                body=bytes(body),
+                self.should_close = self._conn.their_state is h11.MUST_CLOSE
+                return HttpRequest(
+                    method=request.method.decode("ascii"),
+                    target=request.target.decode("ascii"),
+                    http_version=request.http_version.decode("ascii"),
+                    raw_headers=list(request.headers),
+                    body=bytes(body),
+                )
+
+    def serialize_response(
+        self,
+        status_code: int,
+        headers: list[tuple[bytes, bytes]],
+        body: bytes,
+    ) -> bytes:
+        """Serialize the response through this connection's h11 state machine.
+
+        The same h11.Connection that parsed the request must also send the
+        response: only then does the state machine return from SEND_RESPONSE
+        to DONE so the next request can be parsed (keep-alive). When the
+        client asked to close, Connection: close is injected and the state
+        machine transitions to MUST_CLOSE/CLOSED.
+        """
+        out_headers = list(headers)
+        lowered = {k.lower() for k, _ in out_headers}
+        if self.should_close and b"connection" not in lowered:
+            out_headers.append((b"connection", b"close"))
+        out = self._conn.send(
+            h11.Response(
+                status_code=status_code,
+                headers=_ensure_framing(out_headers, body),
             )
+        )
+        if body:
+            out += self._conn.send(h11.Data(data=body))
+        out += self._conn.send(h11.EndOfMessage())
+        if not self.should_close and self._conn.our_state is h11.DONE:
+            # h11 keeps returning PAUSED until the next cycle is armed;
+            # only a keep-alive connection continues.
+            self._conn.start_next_cycle()
+        return out
 
 
 async def read_response(
