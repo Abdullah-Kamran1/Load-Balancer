@@ -210,7 +210,16 @@ async def run_acceptance() -> int:
 
 
 def run_live() -> int:
-    """Distribution check against an already-running proxy + real farm."""
+    """Distribution check against an already-running proxy + real farm.
+
+    Pass --strategy round_robin|least_active_requests|ip_hash (matching the
+    LB_STRATEGY the proxy was started with) to also assert the plan's
+    distribution criterion: cycling strategies must spread 40 requests over
+    all four backends (>= 5 each), ip_hash must pin them to one backend.
+    """
+    strategy = None
+    if "--strategy" in sys.argv:
+        strategy = sys.argv[sys.argv.index("--strategy") + 1]
     failures = []
     ids = []
     statuses = collections.Counter()
@@ -226,12 +235,24 @@ def run_live() -> int:
         except (urllib.error.URLError, TimeoutError, OSError) as e:
             statuses[f"error:{e}"] += 1
     dist = collections.Counter(ids)
+    print(f"strategy: {strategy}")
     print("live statuses:", dict(statuses))
     print("live distribution:", dict(dist))
     if set(statuses) != {200}:
         failures.append(f"non-200 statuses: {dict(statuses)}")
     if set(dist) - {"backend-1", "backend-2", "backend-3", "backend-4"}:
         failures.append(f"unexpected backend ids: {dict(dist)}")
+    if strategy in ("round_robin", "least_active_requests"):
+        counts = [dist.get(f"backend-{i}", 0) for i in range(1, 5)]
+        if min(counts) < 5:
+            failures.append(
+                f"{strategy} did not cycle evenly over the farm: {dict(dist)}"
+            )
+    elif strategy == "ip_hash":
+        if len(dist) != 1:
+            failures.append(f"ip_hash not deterministic for one client IP: {dict(dist)}")
+    else:
+        print("note: pass --strategy to assert the plan's distribution criterion")
     if failures:
         print("FAILURES:")
         for f in failures:
