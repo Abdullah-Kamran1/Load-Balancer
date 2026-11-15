@@ -1,11 +1,16 @@
-"""The asyncio + h11 L7 reverse proxy (Phase 2).
+"""The asyncio + h11 L7 reverse proxy.
 
-Phase 2 semantics (deliberate, from the plan):
-- one HTTP request per client connection; the connection is closed after
-  the response. Persistent connections are Phase 3.
-- the upstream connection is opened per request and closed after it.
+Phase 3 semantics (deliberate, from the plan):
+- persistent client connections: each accepted connection is served by a
+  per-connection request loop; one HttpStreamReader owns the connection's
+  h11 state machine for parsing requests and serializing responses.
+- the connection is closed when the client asks (Connection: close /
+  HTTP/1.0), on idle/stalled reads, and after 413/400 (mid-request h11
+  state is unusable); 502/503 answers keep the connection alive.
+- the upstream connection is opened per request and closed after it
+  (upstream pooling is a later plan extension).
 - response bodies are read fully (bounded by max_body_bytes) and then
-  written back; streaming relay is a Phase 3 refinement.
+  written back; streaming relay remains a later refinement.
 
 Error contract:
 - no healthy backend                  -> 503
@@ -192,17 +197,21 @@ class ProxyServer:
                 if backend is None:
                     status = 503
                     self.counters["responses_5xx"] += 1
-                    error_body = json.dumps(
-                        {"error": "no healthy backend available"}
-                    ).encode()
                     writer.write(
                         http.serialize_response(
-                            503, [(b"content-type", b"application/json")], error_body
+                            503,
+                            [(b"content-type", b"application/json")],
+                            self._error_body("no healthy backend available"),
                         )
                     )
                     await self._drain_client(writer)
                 else:
                     status, headers, body = await self._forward(request, backend)
+                    if status == 0:
+                        # The client went away mid-flight; _forward already
+                        # released everything and there is no client socket
+                        # left to answer. h11 cannot serialize status 0.
+                        break
                     writer.write(
                         http.serialize_response(status, downstream_headers(headers), body)
                     )
@@ -243,7 +252,9 @@ class ProxyServer:
 
         Does not touch the client socket: responses are serialized by the
         caller through the connection's h11 state machine. Failures return
-        a synthetic 502 response instead of raising.
+        a synthetic 502 response instead of raising. Status 0 means the
+        client went away mid-flight (nothing to answer); the caller closes
+        the connection silently.
         """
         backend.active_requests += 1
         backend.total_requests += 1
@@ -329,16 +340,3 @@ class ProxyServer:
         """
         await asyncio.wait_for(writer.drain(), self._write_timeout)
 
-    async def _write_error(self, writer: asyncio.StreamWriter, status: int, message: str) -> None:
-        try:
-            body = json.dumps({"error": message}).encode()
-            writer.write(
-                serialize_response(
-                    status,
-                    [(b"content-type", b"application/json")],
-                    body,
-                )
-            )
-            await writer.drain()
-        except (ConnectionError, OSError):
-            pass

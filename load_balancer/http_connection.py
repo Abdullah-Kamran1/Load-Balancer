@@ -126,6 +126,11 @@ class HttpStreamReader:
                     raw_headers=list(request.headers),
                     body=bytes(body),
                 )
+            elif event is h11.PAUSED:
+                # Defensive guard against the PAUSED busy-spin bug class:
+                # at this point PAUSED is never a legitimate answer (a read
+                # cycle always ends by returning or serializing first).
+                raise h11.LocalProtocolError("unexpected PAUSED while reading request")
 
     def serialize_response(
         self,

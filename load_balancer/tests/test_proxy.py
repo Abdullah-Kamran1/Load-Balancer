@@ -2,6 +2,7 @@
 
 import asyncio
 
+import h11
 import pytest
 
 from load_balancer.algorithms.round_robin import RoundRobinStrategy
@@ -150,6 +151,167 @@ class TestPersistentClientConnections:
                     await writer.drain()
                     await asyncio.wait_for(read_response(reader, 1 << 20), 5)
                     assert registry.backends()[0].active_requests == 0
+            finally:
+                writer.close()
+                try:
+                    await writer.wait_closed()
+                except (ConnectionError, OSError):
+                    pass
+
+
+class TestReviewFixes:
+    """Phase 3 final review fix pass (review 8ec257d..318e036)."""
+
+    async def test_forward_status_zero_does_not_crash_handler(
+        self, fake_backend_factory, monkeypatch
+    ):
+        """_forward returns status 0 when the client went away mid-flight;
+        the connection handler must close silently, not raise."""
+        backend = await fake_backend_factory()
+        registry = registry_of(backend)
+        proxy = ProxyServer(registry=registry, strategy=RoundRobinStrategy())
+        async with await proxy.start():
+            async def gone(request, backend):
+                return 0, [], b""
+
+            monkeypatch.setattr(proxy, "_forward", gone)
+            recorded = []
+            loop = asyncio.get_running_loop()
+
+            def record(loop, context):
+                recorded.append(context.get("exception", context.get("message")))
+
+            loop.set_exception_handler(record)
+            try:
+                reader, writer = await asyncio.open_connection("127.0.0.1", proxy.port)
+                try:
+                    writer.write(serialize_request("GET", "/", [(b"host", b"t")], b""))
+                    await writer.drain()
+                    tail = await asyncio.wait_for(reader.read(), 5)
+                    assert tail == b""  # silent close: no response bytes
+                finally:
+                    writer.close()
+                    try:
+                        await writer.wait_closed()
+                    except (ConnectionError, OSError):
+                        pass
+                await asyncio.sleep(0.2)
+                protocol_errors = [
+                    e for e in recorded if isinstance(e, h11.LocalProtocolError)
+                ]
+                assert protocol_errors == []
+            finally:
+                loop.set_exception_handler(None)
+
+    def test_write_error_is_bounded_not_shadowed(self):
+        """The bounded _write_error (drains via _drain_client with
+        write_timeout) must not be shadowed by an older unbounded one."""
+        import inspect
+
+        from load_balancer import proxy as proxy_mod
+
+        source = inspect.getsource(proxy_mod.ProxyServer._write_error)
+        assert "_drain_client" in source
+        assert "await writer.drain()" not in source
+
+    async def test_malformed_request_after_good_request_400_then_close(
+        self, fake_backend_factory
+    ):
+        backend = await fake_backend_factory()
+        registry = registry_of(backend)
+        proxy = ProxyServer(registry=registry, strategy=RoundRobinStrategy())
+        async with await proxy.start():
+            reader, writer = await asyncio.open_connection("127.0.0.1", proxy.port)
+            try:
+                writer.write(serialize_request("GET", "/", [(b"host", b"t")], b""))
+                await writer.drain()
+                status, _, _ = await asyncio.wait_for(read_response(reader, 1 << 20), 5)
+                assert status == 200
+                writer.write(b"GARBAGE\r\n\r\n")
+                await writer.drain()
+                status, _, _ = await asyncio.wait_for(read_response(reader, 1 << 20), 5)
+                assert status == 400
+                tail = await asyncio.wait_for(reader.read(), 5)
+                assert tail == b""  # then the connection closes
+            finally:
+                writer.close()
+                try:
+                    await writer.wait_closed()
+                except (ConnectionError, OSError):
+                    pass
+
+    async def test_oversized_client_body_413_then_close(self, fake_backend_factory):
+        backend = await fake_backend_factory()
+        registry = registry_of(backend)
+        proxy = ProxyServer(
+            registry=registry, strategy=RoundRobinStrategy(), max_body_bytes=64
+        )
+        async with await proxy.start():
+            reader, writer = await asyncio.open_connection("127.0.0.1", proxy.port)
+            try:
+                body = b"x" * 128
+                writer.write(
+                    serialize_request(
+                        "POST", "/", [(b"host", b"t"), (b"content-length", b"128")], body
+                    )
+                )
+                await writer.drain()
+                status, _, resp_body = await asyncio.wait_for(
+                    read_response(reader, 1 << 20), 5
+                )
+                assert status == 413
+                assert resp_body  # error body present, valid framing
+                tail = await asyncio.wait_for(reader.read(), 5)
+                assert tail == b""  # connection closed after 413
+            finally:
+                writer.close()
+                try:
+                    await writer.wait_closed()
+                except (ConnectionError, OSError):
+                    pass
+
+    async def test_connection_continues_serving_after_502(self, fake_backend_factory):
+        backend = await fake_backend_factory()
+        registry = registry_of(backend)
+        proxy = ProxyServer(registry=registry, strategy=RoundRobinStrategy())
+        async with await proxy.start():
+            reader, writer = await asyncio.open_connection("127.0.0.1", proxy.port)
+            try:
+                writer.write(serialize_request("GET", "/", [(b"host", b"t")], b""))
+                await writer.drain()
+                status, _, _ = await asyncio.wait_for(read_response(reader, 1 << 20), 5)
+                assert status == 200
+                await backend.close()  # upstream dies between requests
+                for _ in range(2):
+                    writer.write(serialize_request("GET", "/", [(b"host", b"t")], b""))
+                    await writer.drain()
+                    status, resp_body, _ = await asyncio.wait_for(
+                        read_response(reader, 1 << 20), 5
+                    )
+                    assert status == 502  # same client connection still serving
+                    assert resp_body
+            finally:
+                writer.close()
+                try:
+                    await writer.wait_closed()
+                except (ConnectionError, OSError):
+                    pass
+
+    async def test_truncated_request_body_400_then_close(self, fake_backend_factory):
+        """EOF while a request body is still pending: protocol error, 400."""
+        backend = await fake_backend_factory()
+        registry = registry_of(backend)
+        proxy = ProxyServer(registry=registry, strategy=RoundRobinStrategy())
+        async with await proxy.start():
+            reader, writer = await asyncio.open_connection("127.0.0.1", proxy.port)
+            try:
+                writer.write(b"POST / HTTP/1.1\r\nhost: t\r\ncontent-length: 32\r\n\r\nonly")
+                await writer.drain()
+                writer.write_eof()  # client half-closes mid-body
+                status, _, _ = await asyncio.wait_for(read_response(reader, 1 << 20), 5)
+                assert status == 400
+                tail = await asyncio.wait_for(reader.read(), 5)
+                assert tail == b""
             finally:
                 writer.close()
                 try:
