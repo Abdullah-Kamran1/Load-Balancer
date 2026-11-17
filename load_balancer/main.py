@@ -94,6 +94,9 @@ async def serve() -> None:
                 await dump_task
             except asyncio.CancelledError:
                 pass
+            except Exception:
+                # teardown must always reach proxy.close()/monitor.stop()
+                logger.exception("metrics dump task failed during shutdown")
         await proxy.close()
         await monitor.stop()
         logger.info("proxy stopped")

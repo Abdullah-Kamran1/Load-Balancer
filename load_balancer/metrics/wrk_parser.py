@@ -44,10 +44,16 @@ def parse_wrk_output(text: str) -> dict:
         metrics["threads"] = int(m.group(1))
         metrics["connections"] = int(m.group(2))
 
-    m = re.search(r"(\d+) requests in ([\d.]+)(s|ms)\b", text)
+    # wrk's format_time_us switches to base-60 units at ~51s: the
+    # requests line reads "42000 requests in 1.50m" (fractional minutes).
+    m = re.search(r"(\d+) requests in ([\d.]+)(ms|s|m)\b", text)
     if m:
         metrics["requests_total"] = int(m.group(1))
-        metrics["duration_s"] = _to_ms(m.group(2), m.group(3)) / 1000.0
+        unit = m.group(3)
+        if unit == "m":
+            metrics["duration_s"] = float(m.group(2)) * 60.0
+        else:
+            metrics["duration_s"] = _to_ms(m.group(2), unit) / 1000.0
 
     m = re.search(r"Requests/sec:\s+([\d.]+)", text)
     if m:

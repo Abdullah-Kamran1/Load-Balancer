@@ -8,9 +8,12 @@ observes a partial JSON document.
 """
 
 import asyncio
+import logging
 import os
 
 from .snapshot import collect_run_snapshot, write_json
+
+logger = logging.getLogger("lb.metrics")
 
 
 async def dump_loop(
@@ -20,13 +23,22 @@ async def dump_loop(
     path,
     interval: float = 1.0,
 ) -> None:
-    """Write the run snapshot JSON to path every interval until cancelled."""
+    """Write the run snapshot JSON to path every interval until cancelled.
+
+    A failed cycle (e.g. Windows PermissionError when a concurrent
+    reader holds the destination open during os.replace) is logged and
+    skipped: the loop must survive for the rest of the run, not die
+    silently mid-benchmark.
+    """
     tmp = str(path) + ".tmp"
     try:
         while True:
-            snapshot = collect_run_snapshot(proxy, registry, strategy_name)
-            write_json(snapshot, tmp)
-            os.replace(tmp, path)  # atomic on POSIX and Windows
+            try:
+                snapshot = collect_run_snapshot(proxy, registry, strategy_name)
+                write_json(snapshot, tmp)
+                os.replace(tmp, path)  # atomic on POSIX and Windows
+            except OSError as e:
+                logger.warning("metrics dump cycle failed, retrying next interval: %s", e)
             await asyncio.sleep(interval)
     except asyncio.CancelledError:
         raise

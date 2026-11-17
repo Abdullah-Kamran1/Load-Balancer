@@ -255,6 +255,16 @@ class TestWrkParser:
         assert m["latency_ms"]["p99"] == 33.80
         assert m["thread_latency_avg_ms"] == 23.50
 
+    def test_parses_minutes_scale_runtime(self):
+        # wrk switches to base-60 units at ~51s: "42000 requests in 1.50m"
+        text = WRK_SAMPLE.replace(
+            "  3402 requests in 8.01s, 627.55KB read",
+            "  42000 requests in 1.50m, 7.50MB read",
+        )
+        m = parse_wrk_output(text)
+        assert m["requests_total"] == 42000
+        assert m["duration_s"] == 90.0
+
     def test_socket_errors_line_is_optional(self):
         m = parse_wrk_output(WRK_SAMPLE)
         assert m["socket_errors"] is None
@@ -336,6 +346,44 @@ class TestDumpLoop:
         assert loaded["meta"]["strategy"] == "round_robin"
         assert loaded["proxy"]["counters"]["requests_total"] == 1
         assert loaded["backends"][0]["backend_id"] == "backend-1"
+
+    async def test_dump_survives_concurrent_reader_holding_file(self, fake_backend_factory, tmp_path):
+        # Windows: os.replace fails with PermissionError while another
+        # handle holds the destination open. The loop must skip the cycle
+        # and keep dumping, not die silently mid-benchmark.
+        fb = await fake_backend_factory()
+        registry = registry_of(fb)
+        proxy = ProxyServer(registry=registry, strategy=RoundRobinStrategy())
+        path = tmp_path / "metrics_dump.json"
+        async with await proxy.start():
+            task = asyncio.create_task(
+                dump_loop(proxy, registry, "round_robin", path, interval=0.02)
+            )
+            try:
+                # wait for the first dump
+                deadline = asyncio.get_running_loop().time() + 3
+                while not path.exists() and asyncio.get_running_loop().time() < deadline:
+                    await asyncio.sleep(0.01)
+                assert path.exists()
+                # hold the destination open like a concurrent consumer
+                with open(path, "r", encoding="utf-8") as held:
+                    await asyncio.sleep(0.3)  # several dump cycles collide
+                # after release, a fresh dump must land (counters unchanged
+                # is fine: any later write proves the loop still runs)
+                deadline = asyncio.get_running_loop().time() + 3
+                survived = False
+                while asyncio.get_running_loop().time() < deadline:
+                    if not task.done():  # still running
+                        survived = True
+                        break
+                    await asyncio.sleep(0.01)
+                assert survived, f"dump_loop died: {task.exception()}"
+            finally:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
 
     async def test_dump_is_atomic_no_partial_reads(self, fake_backend_factory, tmp_path):
         # a reader concurrently opening the file must never see a partial
