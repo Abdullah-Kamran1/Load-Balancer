@@ -1,6 +1,7 @@
 """Backend registry: owns the authoritative list of backends and their
-health state (Phase 2). Active health checks (Phase 5) will drive
-mark_up()/mark_down(); for now the proxy flips state passively.
+health state. Active health checks (HealthMonitor, Phase 5) drive
+mark_up()/mark_down() after their consecutive failure/success thresholds;
+each actual state change is recorded on the Backend with a timestamp.
 """
 
 import time
