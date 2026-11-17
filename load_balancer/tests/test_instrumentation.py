@@ -302,3 +302,67 @@ class TestCombinedCsv:
         assert col("mode") == "custom"
         assert col("strategy") == "round_robin"
         assert "backend-1:100.0" in col("backend_shares")
+
+
+# ---------------------------------------------------------------- Task 4:
+# periodic snapshot dump for live runs (LB_METRICS_DUMP_PATH).
+
+from load_balancer.metrics.dumper import dump_loop
+
+
+class TestDumpLoop:
+    async def test_dump_loop_writes_snapshot_json_periodically(self, fake_backend_factory, tmp_path):
+        fb = await fake_backend_factory()
+        registry = registry_of(fb)
+        proxy = ProxyServer(registry=registry, strategy=RoundRobinStrategy())
+        path = tmp_path / "metrics_dump.json"
+        async with await proxy.start():
+            await get_through(proxy.port)
+            task = asyncio.create_task(
+                dump_loop(proxy, registry, "round_robin", path, interval=0.05)
+            )
+            try:
+                deadline = asyncio.get_running_loop().time() + 3
+                while not path.exists() and asyncio.get_running_loop().time() < deadline:
+                    await asyncio.sleep(0.02)
+                assert path.exists()
+            finally:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+        assert loaded["meta"]["strategy"] == "round_robin"
+        assert loaded["proxy"]["counters"]["requests_total"] == 1
+        assert loaded["backends"][0]["backend_id"] == "backend-1"
+
+    async def test_dump_is_atomic_no_partial_reads(self, fake_backend_factory, tmp_path):
+        # a reader concurrently opening the file must never see a partial
+        # JSON document: the dump writes to a temp file and replaces.
+        fb = await fake_backend_factory()
+        registry = registry_of(fb)
+        proxy = ProxyServer(registry=registry, strategy=RoundRobinStrategy())
+        path = tmp_path / "metrics_dump.json"
+        async with await proxy.start():
+            task = asyncio.create_task(
+                dump_loop(proxy, registry, "round_robin", path, interval=0.02)
+            )
+            try:
+                deadline = asyncio.get_running_loop().time() + 3
+                reads = 0
+                while asyncio.get_running_loop().time() < deadline:
+                    if path.exists():
+                        data = path.read_text(encoding="utf-8")
+                        json.loads(data)  # raises if a partial write was visible
+                        reads += 1
+                        if reads >= 5:
+                            break
+                    await asyncio.sleep(0.01)
+                assert reads >= 5  # observed enough dumps
+            finally:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
