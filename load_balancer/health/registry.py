@@ -3,6 +3,8 @@ health state (Phase 2). Active health checks (Phase 5) will drive
 mark_up()/mark_down(); for now the proxy flips state passively.
 """
 
+import time
+
 from ..models import Backend
 
 
@@ -17,10 +19,18 @@ class BackendRegistry:
         return [b for b in self._backends if b.healthy]
 
     def mark_down(self, backend: Backend) -> None:
-        backend.healthy = False
+        if backend.healthy:
+            backend.healthy = False
+            backend.state_transitions.append(
+                {"state": "down", "timestamp": time.time()}
+            )
 
     def mark_up(self, backend: Backend) -> None:
-        backend.healthy = True
+        if not backend.healthy:
+            backend.healthy = True
+            backend.state_transitions.append(
+                {"state": "up", "timestamp": time.time()}
+            )
 
     def snapshot(self) -> list[dict]:
         return [
@@ -31,6 +41,7 @@ class BackendRegistry:
                 "healthy": b.healthy,
                 "active_requests": b.active_requests,
                 "total_requests": b.total_requests,
+                "state_transitions": list(b.state_transitions),
             }
             for b in self._backends
         ]

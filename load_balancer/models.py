@@ -19,6 +19,9 @@ class Backend:
     healthy: bool = True
     active_requests: int = 0
     total_requests: int = 0
+    # history of actual state changes, appended by BackendRegistry:
+    # [{"state": "down"|"up", "timestamp": float}, ...] (Phase 5)
+    state_transitions: list[dict] = field(default_factory=list)
 
     @property
     def address(self) -> tuple[str, int]:
