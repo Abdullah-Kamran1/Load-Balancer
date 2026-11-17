@@ -90,3 +90,120 @@ class TestLatencySamples:
         async with await proxy.start():
             await get_through(proxy.port)
         assert proxy.latencies_ms[0] >= 110  # must include the upstream delay
+
+
+# ---------------------------------------------------------------- Task 2:
+# metrics.py — run snapshot + JSON/CSV export.
+
+import json
+
+from load_balancer.metrics import (
+    append_backends_csv,
+    append_summary_csv,
+    collect_run_snapshot,
+    percentile,
+    write_json,
+)
+
+
+class TestPercentile:
+    def test_exact_interpolation_on_known_samples(self):
+        samples = [float(i) for i in range(1, 101)]  # 1..100
+        # linear interpolation: idx = (p/100) * (n-1)
+        assert percentile(samples, 50) == 50.5   # idx 49.5 between 50 and 51
+        assert percentile(samples, 95) == 95.05  # idx 94.05 between 95 and 96
+        assert percentile(samples, 99) == 99.01  # idx 98.01 between 99 and 100
+
+    def test_single_sample_returns_itself(self):
+        assert percentile([7.5], 99) == 7.5
+
+    def test_empty_samples_return_none(self):
+        assert percentile([], 50) is None
+
+
+class TestRunSnapshot:
+    async def test_snapshot_structure_and_shares(self, fake_backend_factory):
+        fb1 = await fake_backend_factory()
+        fb2 = await fake_backend_factory()
+        backends = [
+            Backend(backend_id="b1", host=fb1.host, port=fb1.port),
+            Backend(backend_id="b2", host=fb2.host, port=fb2.port),
+        ]
+        registry = BackendRegistry(backends)
+        proxy = ProxyServer(registry=registry, strategy=RoundRobinStrategy())
+        async with await proxy.start():
+            for _ in range(4):
+                await get_through(proxy.port)
+        snap = collect_run_snapshot(proxy, registry, strategy_name="round_robin")
+        assert snap["meta"]["strategy"] == "round_robin"
+        assert snap["proxy"]["counters"]["requests_total"] == 4
+        assert snap["proxy"]["latency_ms"]["p50"] is not None
+        assert snap["proxy"]["latency_ms"]["p99"] >= snap["proxy"]["latency_ms"]["p50"]
+        shares = {b["backend_id"]: b["share_pct"] for b in snap["backends"]}
+        assert shares["b1"] == 50.0 and shares["b2"] == 50.0
+        assert all("state_transitions" in b for b in snap["backends"])
+
+    async def test_unhealthy_backend_excluded_from_share_denominator(self, fake_backend_factory):
+        fb = await fake_backend_factory()
+        down = Backend(backend_id="down", host="127.0.0.1", port=1)
+        down.healthy = False
+        backends = [Backend(backend_id="b1", host=fb.host, port=fb.port), down]
+        registry = BackendRegistry(backends)
+        proxy = ProxyServer(registry=registry, strategy=RoundRobinStrategy())
+        async with await proxy.start():
+            for _ in range(2):
+                await get_through(proxy.port)  # all routed to b1
+        snap = collect_run_snapshot(proxy, registry, strategy_name="round_robin")
+        by_id = {b["backend_id"]: b for b in snap["backends"]}
+        # the dead backend served nothing: 0% share, b1 has all of it
+        assert by_id["down"]["total_requests"] == 0
+        assert by_id["down"]["share_pct"] == 0.0
+        assert by_id["b1"]["share_pct"] == 100.0
+
+
+class TestExport:
+    async def test_json_round_trip(self, fake_backend_factory, tmp_path):
+        fb = await fake_backend_factory()
+        proxy = ProxyServer(registry=registry_of(fb), strategy=RoundRobinStrategy())
+        async with await proxy.start():
+            await get_through(proxy.port)
+        snap = collect_run_snapshot(proxy, registry_of(fb), strategy_name="round_robin")
+        out = tmp_path / "run.json"
+        write_json(snap, out)
+        loaded = json.loads(out.read_text())
+        assert loaded["meta"]["strategy"] == "round_robin"
+        assert loaded["proxy"]["counters"]["requests_total"] == 1
+
+    async def test_summary_csv_appends_header_once(self, fake_backend_factory, tmp_path):
+        fb = await fake_backend_factory()
+        proxy = ProxyServer(registry=registry_of(fb), strategy=RoundRobinStrategy())
+        async with await proxy.start():
+            await get_through(proxy.port)
+        snap1 = collect_run_snapshot(proxy, registry_of(fb), strategy_name="round_robin")
+        snap2 = collect_run_snapshot(proxy, registry_of(fb), strategy_name="round_robin")
+        csv_path = tmp_path / "summary.csv"
+        append_summary_csv(snap1, csv_path, run_id="r1")
+        append_summary_csv(snap2, csv_path, run_id="r2")
+        lines = csv_path.read_text().strip().splitlines()
+        assert len(lines) == 3  # header + 2 runs
+        assert "run_id" in lines[0]
+        assert lines[1].startswith("r1,") and lines[2].startswith("r2,")
+
+    async def test_backends_csv_one_row_per_backend(self, fake_backend_factory, tmp_path):
+        fb1 = await fake_backend_factory()
+        fb2 = await fake_backend_factory()
+        backends = [
+            Backend(backend_id="b1", host=fb1.host, port=fb1.port),
+            Backend(backend_id="b2", host=fb2.host, port=fb2.port),
+        ]
+        registry = BackendRegistry(backends)
+        proxy = ProxyServer(registry=registry, strategy=RoundRobinStrategy())
+        async with await proxy.start():
+            for _ in range(4):
+                await get_through(proxy.port)
+        snap = collect_run_snapshot(proxy, registry, strategy_name="round_robin")
+        csv_path = tmp_path / "backends.csv"
+        append_backends_csv(snap, csv_path, run_id="r1")
+        lines = csv_path.read_text().strip().splitlines()
+        assert len(lines) == 3  # header + 2 backends
+        assert "backend_id" in lines[0] and "share_pct" in lines[0]
