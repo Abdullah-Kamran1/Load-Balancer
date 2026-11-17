@@ -127,7 +127,12 @@ class ProxyServer:
             "connections_total": 0,
             "responses_5xx": 0,
             "errors": 0,
+            # Phase 6: exact per-status counts (200/400/413/502/503/...)
+            "status_counts": {},
         }
+        # Phase 6: one full-request-latency sample (ms, monotonic
+        # time.perf_counter) per answered request, for percentile export.
+        self.latencies_ms: list[float] = []
 
     @property
     def port(self) -> int:
@@ -149,6 +154,13 @@ class ProxyServer:
 
     async def __aexit__(self, *exc):
         await self.close()
+
+    def _record(self, status: int, duration_ms: float) -> None:
+        """Book one answered request: exact status count + latency sample."""
+        self.counters["status_counts"][status] = (
+            self.counters["status_counts"].get(status, 0) + 1
+        )
+        self.latencies_ms.append(duration_ms)
 
     # ---- connection handling -------------------------------------------------
 
@@ -180,10 +192,12 @@ class ProxyServer:
                 except BodyTooLargeError:
                     status = 413
                     await self._write_error(writer, 413, "request body too large")
+                    self._record(status, round((time.perf_counter() - start) * 1000, 2))
                     break  # mid-request state: cannot continue this connection
                 except (h11.RemoteProtocolError, ValueError):
                     status = 400
                     await self._write_error(writer, 400, "malformed request")
+                    self._record(status, round((time.perf_counter() - start) * 1000, 2))
                     break  # mid-request state: cannot continue this connection
 
                 if request is None:
@@ -218,6 +232,7 @@ class ProxyServer:
                     await self._drain_client(writer)
 
                 duration_ms = round((time.perf_counter() - start) * 1000, 2)
+                self._record(status, duration_ms)
                 logger.info(
                     "request=%s client=%s backend=%s status=%s duration_ms=%s",
                     request_id,
