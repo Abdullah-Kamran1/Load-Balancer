@@ -84,3 +84,25 @@ class TestHealthConfigWiring:
             load_config({"LB_HEALTH_FAILURES": "0"})
         with pytest.raises(ValueError):
             load_config({"LB_HEALTH_RECOVERIES": "-1"})
+
+    def test_health_non_finite_raises(self):
+        # NaN passes the <= 0 check and would silently disable probing
+        # (interval=nan -> sleep(nan) stalls the loop forever); inf is
+        # equally meaningless. Both must fail fast at startup.
+        with pytest.raises(ValueError):
+            load_config({"LB_HEALTH_INTERVAL": "nan"})
+        with pytest.raises(ValueError):
+            load_config({"LB_HEALTH_INTERVAL": "inf"})
+        with pytest.raises(ValueError):
+            load_config({"LB_HEALTH_TIMEOUT": "nan"})
+        with pytest.raises(ValueError):
+            load_config({"LB_HEALTH_TIMEOUT": "-inf"})
+
+    def test_duplicate_backend_ids_raise(self):
+        # duplicate ids key the monitor's per-backend probe tasks; the
+        # second start() would overwrite the first handle and leak an
+        # unstoppable task. Ids must be unique.
+        with pytest.raises(ValueError):
+            load_config(
+                {"LB_BACKENDS": "a:127.0.0.1:8001,a:127.0.0.1:8002"}
+            )

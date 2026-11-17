@@ -9,6 +9,7 @@ LB_HEALTH_RECOVERIES — active health checks (Phase 5)
 Malformed values fail fast at startup rather than misroute traffic later.
 """
 
+import math
 import os
 from dataclasses import dataclass, field
 
@@ -29,10 +30,12 @@ class HealthConfig:
     recovery_threshold: int = 2    # consecutive successes -> UP (LB_HEALTH_RECOVERIES)
 
     def __post_init__(self):
-        if self.interval <= 0:
-            raise ValueError("LB_HEALTH_INTERVAL must be > 0")
-        if self.timeout <= 0:
-            raise ValueError("LB_HEALTH_TIMEOUT must be > 0")
+        # isfinite: NaN passes <= 0 and would silently stall the probe
+        # loop (sleep(nan)); inf is equally meaningless.
+        if not math.isfinite(self.interval) or self.interval <= 0:
+            raise ValueError("LB_HEALTH_INTERVAL must be a finite number > 0")
+        if not math.isfinite(self.timeout) or self.timeout <= 0:
+            raise ValueError("LB_HEALTH_TIMEOUT must be a finite number > 0")
         if self.failure_threshold < 1:
             raise ValueError("LB_HEALTH_FAILURES must be >= 1")
         if self.recovery_threshold < 1:
@@ -69,6 +72,10 @@ def parse_backends(raw: str) -> list[Backend]:
         if not backend_id or not host:
             raise ValueError(f"LB_BACKENDS entry has empty id or host: {entry!r}")
         backends.append(Backend(backend_id=backend_id, host=host, port=port))
+    ids = [b.backend_id for b in backends]
+    if len(ids) != len(set(ids)):
+        dupes = sorted(i for i in set(ids) if ids.count(i) > 1)
+        raise ValueError(f"LB_BACKENDS has duplicate backend ids: {dupes}")
     if not backends:
         raise ValueError("LB_BACKENDS produced no backends")
     return backends
