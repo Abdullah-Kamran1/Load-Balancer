@@ -207,3 +207,98 @@ class TestExport:
         lines = csv_path.read_text().strip().splitlines()
         assert len(lines) == 3  # header + 2 backends
         assert "backend_id" in lines[0] and "share_pct" in lines[0]
+
+
+# ---------------------------------------------------------------- Task 3:
+# wrk output parser + combined CSV row.
+
+from load_balancer.metrics.wrk_parser import (
+    COMBINED_HEADER,
+    append_combined_csv,
+    parse_wrk_output,
+)
+
+# real wrk --latency output from results/raw/phase3_wrk_keepalive.txt
+WRK_SAMPLE = """Running 8s test @ http://host.docker.internal:8080/work?delay_ms=5
+  2 threads and 10 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency    23.50ms    4.05ms  41.57ms   74.49%
+    Req/Sec   213.33     37.30   340.00     81.88%
+  Latency Distribution
+     50%   23.83ms
+     75%   25.76ms
+     90%   27.78ms
+     99%   33.80ms
+  3402 requests in 8.01s, 627.55KB read
+Requests/sec:    424.77
+Transfer/sec:     78.36KB
+"""
+
+WRK_SAMPLE_ERRORS = WRK_SAMPLE.replace(
+    "Requests/sec:    424.77",
+    "Non-2xx or 3xx responses: 14\nRequests/sec:    424.77\n"
+    "  Socket errors: connect 0, read 2, write 0, timeout 1",
+)
+
+
+class TestWrkParser:
+    def test_parses_real_wrk_sample(self):
+        m = parse_wrk_output(WRK_SAMPLE)
+        assert m["threads"] == 2
+        assert m["connections"] == 10
+        assert m["requests_total"] == 3402
+        assert m["duration_s"] == 8.01
+        assert m["requests_per_sec"] == 424.77
+        assert m["latency_ms"]["p50"] == 23.83
+        assert m["latency_ms"]["p75"] == 25.76
+        assert m["latency_ms"]["p90"] == 27.78
+        assert m["latency_ms"]["p99"] == 33.80
+        assert m["thread_latency_avg_ms"] == 23.50
+
+    def test_socket_errors_line_is_optional(self):
+        m = parse_wrk_output(WRK_SAMPLE)
+        assert m["socket_errors"] is None
+        assert m["non_2xx"] is None
+
+    def test_parses_error_lines(self):
+        m = parse_wrk_output(WRK_SAMPLE_ERRORS)
+        assert m["socket_errors"] == {"connect": 0, "read": 2, "write": 0, "timeout": 1}
+        assert m["non_2xx"] == 14
+
+    def test_latency_unit_conversion(self):
+        text = WRK_SAMPLE.replace("50%   23.83ms", "50%   1.50us").replace(
+            "75%   25.76ms", "75%   1.20s"
+        )
+        m = parse_wrk_output(text)
+        assert m["latency_ms"]["p50"] == 0.0015
+        assert m["latency_ms"]["p75"] == 1200.0
+
+
+class TestCombinedCsv:
+    async def test_combined_row_schema_and_append(self, fake_backend_factory, tmp_path):
+        fb = await fake_backend_factory()
+        registry = registry_of(fb)
+        proxy = ProxyServer(registry=registry, strategy=RoundRobinStrategy())
+        async with await proxy.start():
+            for _ in range(6):
+                await get_through(proxy.port)
+        snap = collect_run_snapshot(proxy, registry, strategy_name="round_robin")
+        wrk = parse_wrk_output(WRK_SAMPLE)
+        csv_path = tmp_path / "combined.csv"
+        append_combined_csv(wrk, snap, csv_path, run_id="r1", mode="custom")
+        append_combined_csv(wrk, snap, csv_path, run_id="r2", mode="custom")
+        lines = csv_path.read_text().strip().splitlines()
+        assert lines[0] == ",".join(COMBINED_HEADER)
+        assert len(lines) == 3
+        row = lines[1].split(",")
+        assert row[0] == "r1"
+        # find columns by header position instead of fixed index
+        header = lines[0].split(",")
+        def col(name):
+            return row[header.index(name)]
+        assert col("wrk_requests") == "3402"
+        assert float(col("wrk_p99_ms")) == 33.8
+        assert col("proxy_requests_total") == "6"
+        assert col("mode") == "custom"
+        assert col("strategy") == "round_robin"
+        assert "backend-1:100.0" in col("backend_shares")
