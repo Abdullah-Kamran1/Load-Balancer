@@ -49,3 +49,38 @@ class TestStrategyWiring:
     def test_unknown_strategy_raises(self):
         with pytest.raises(ValueError):
             load_config({"LB_STRATEGY": "magic_algorithm"})
+
+
+class TestHealthConfigWiring:
+    def test_health_defaults_match_monitor(self):
+        cfg = load_config({})
+        assert cfg.health.interval == 1.0
+        assert cfg.health.timeout == 1.0
+        assert cfg.health.failure_threshold == 3
+        assert cfg.health.recovery_threshold == 2
+
+    def test_health_env_vars_override_defaults(self):
+        cfg = load_config(
+            {
+                "LB_HEALTH_INTERVAL": "0.5",
+                "LB_HEALTH_TIMEOUT": "2",
+                "LB_HEALTH_FAILURES": "5",
+                "LB_HEALTH_RECOVERIES": "3",
+            }
+        )
+        assert cfg.health.interval == 0.5
+        assert cfg.health.timeout == 2.0
+        assert cfg.health.failure_threshold == 5
+        assert cfg.health.recovery_threshold == 3
+
+    def test_health_non_numeric_raises(self):
+        with pytest.raises(ValueError):
+            load_config({"LB_HEALTH_INTERVAL": "fast"})
+
+    def test_health_non_positive_raises(self):
+        with pytest.raises(ValueError):
+            load_config({"LB_HEALTH_TIMEOUT": "0"})
+        with pytest.raises(ValueError):
+            load_config({"LB_HEALTH_FAILURES": "0"})
+        with pytest.raises(ValueError):
+            load_config({"LB_HEALTH_RECOVERIES": "-1"})
