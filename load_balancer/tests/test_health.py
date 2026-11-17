@@ -80,3 +80,126 @@ class TestTransitionRecording:
         by_id = {s["backend_id"]: s for s in snap}
         assert by_id["a"]["state_transitions"] == []
         assert [e["state"] for e in by_id["b"]["state_transitions"]] == ["down"]
+
+
+# ---------------------------------------------------------------- Task 2:
+# HealthMonitor — active GET /health probes driving registry state.
+
+import asyncio
+
+from load_balancer.health.monitor import HealthMonitor
+from .conftest import FakeBackend
+
+
+async def wait_until(pred, timeout: float = 3.0, step: float = 0.01):
+    """Poll pred() until true or deadline; assert-style helper."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if pred():
+            return True
+        await asyncio.sleep(step)
+    return False
+
+
+class TestHealthMonitor:
+    async def test_probes_health_endpoint_with_get(self, fake_backend_factory):
+        fb = await fake_backend_factory()
+        registry = BackendRegistry(
+            [Backend(backend_id="b1", host=fb.host, port=fb.port)]
+        )
+        monitor = HealthMonitor(registry, interval=10, timeout=0.5,
+                                failure_threshold=3, recovery_threshold=2)
+        await monitor.start()
+        try:
+            assert await wait_until(lambda: len(fb.requests) >= 1)
+            probe = fb.requests[0]
+            assert probe["method"] == "GET"
+            assert probe["target"] == "/health"
+            # healthy backend stays healthy
+            assert registry.healthy_backends() != []
+        finally:
+            await monitor.stop()
+
+    async def test_marks_down_after_consecutive_failures(self):
+        # port 1: nothing listening -> connection refused on every probe
+        b = Backend(backend_id="dead", host="127.0.0.1", port=1)
+        registry = BackendRegistry([b])
+        monitor = HealthMonitor(registry, interval=0.05, timeout=0.5,
+                                failure_threshold=2, recovery_threshold=2)
+        await monitor.start()
+        try:
+            assert await wait_until(lambda: b.healthy is False)
+            assert [e["state"] for e in b.state_transitions] == ["down"]
+            assert registry.healthy_backends() == []
+        finally:
+            await monitor.stop()
+
+    async def test_counts_non_200_response_as_failure(self, fake_backend_factory):
+        fb = await fake_backend_factory(status=500)
+        b = Backend(backend_id="b1", host=fb.host, port=fb.port)
+        registry = BackendRegistry([b])
+        monitor = HealthMonitor(registry, interval=0.05, timeout=0.5,
+                                failure_threshold=2, recovery_threshold=2)
+        await monitor.start()
+        try:
+            assert await wait_until(lambda: b.healthy is False)
+        finally:
+            await monitor.stop()
+
+    async def test_probe_timeout_counts_as_failure(self, fake_backend_factory):
+        fb = await fake_backend_factory(delay_ms=800)  # answers, but too late
+        b = Backend(backend_id="b1", host=fb.host, port=fb.port)
+        registry = BackendRegistry([b])
+        monitor = HealthMonitor(registry, interval=0.05, timeout=0.1,
+                                failure_threshold=1, recovery_threshold=2)
+        await monitor.start()
+        try:
+            assert await wait_until(lambda: b.healthy is False)
+        finally:
+            await monitor.stop()
+
+    async def test_marks_up_after_recovery_threshold(self, fake_backend_factory):
+        fb = await fake_backend_factory(status=500)
+        b = Backend(backend_id="b1", host=fb.host, port=fb.port)
+        registry = BackendRegistry([b])
+        monitor = HealthMonitor(registry, interval=0.05, timeout=0.5,
+                                failure_threshold=2, recovery_threshold=2)
+        await monitor.start()
+        try:
+            assert await wait_until(lambda: b.healthy is False)
+            # backend recovers
+            fb.status = 200
+            assert await wait_until(lambda: b.healthy is True)
+            assert [e["state"] for e in b.state_transitions] == ["down", "up"]
+        finally:
+            await monitor.stop()
+
+    async def test_single_success_does_not_flip_unhealthy_backend(self, fake_backend_factory):
+        # anti-flapping: recovery needs `recovery_threshold` consecutive
+        # successes; drive check_backend directly for determinism.
+        fb = await fake_backend_factory(status=200)
+        b = Backend(backend_id="b1", host=fb.host, port=fb.port)
+        b.healthy = False
+        registry = BackendRegistry([b])
+        monitor = HealthMonitor(registry, interval=10, timeout=0.5,
+                                failure_threshold=3, recovery_threshold=2)
+        success = await monitor.check_backend(b)
+        assert success is True
+        assert b.healthy is False  # one success is not enough
+        success = await monitor.check_backend(b)
+        assert success is True
+        assert b.healthy is True  # second consecutive success -> UP
+        assert [e["state"] for e in b.state_transitions] == ["up"]
+
+    async def test_stop_halts_probing_and_cancels_tasks(self, fake_backend_factory):
+        fb = await fake_backend_factory()
+        b = Backend(backend_id="b1", host=fb.host, port=fb.port)
+        registry = BackendRegistry([b])
+        monitor = HealthMonitor(registry, interval=0.02, timeout=0.5,
+                                failure_threshold=100, recovery_threshold=2)
+        await monitor.start()
+        assert await wait_until(lambda: len(fb.requests) >= 2)
+        await monitor.stop()
+        count = len(fb.requests)
+        await asyncio.sleep(0.15)
+        assert len(fb.requests) == count  # no probes after stop
