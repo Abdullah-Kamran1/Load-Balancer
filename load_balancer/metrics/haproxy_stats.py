@@ -100,7 +100,9 @@ def synthesize_snapshot(
     # sum of server stot only covers delivered requests.
     client_row = frontend_row or backend_row
     total = sum(s["stot"] for s in servers.values())
-    requests_total = client_row.get("req_tot") or backend_row.get("stot", 0)
+    requests_total = client_row.get("req_tot")
+    if requests_total is None:  # stats dict without req_tot (older export)
+        requests_total = backend_row.get("stot", 0)
     status_counts = dict(client_row.get("status_counts", {}))
     # A FRONTEND row's stot counts client connections; a backend/server
     # stot counts sessions (one per request here because of http-server-close).

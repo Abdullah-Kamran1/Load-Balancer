@@ -203,21 +203,17 @@ def env_path(run_id: str):
 
 
 def save_environment(run_id: str) -> str:
-    version = run(["docker", "exec", "lb-haproxy", "haproxy", "-vv"]).stdout
-    if not version.strip():
-        version = run(
-            [
-                "docker",
-                "run",
-                "--rm",
-                "haproxy:3.4-alpine@sha256:b9fe316f718d5015c5cfebd8ca019591f3e44656f61d93cb8b59a1028961e530",
-                "haproxy",
-                "-vv",
-            ]
-        ).stdout
+    # Single source of truth for the image reference: the running container
+    # (which compose started from the digest-pinned `image:` entry).
     image_ref = run(
         ["docker", "inspect", "--format", "{{.Config.Image}}", "lb-haproxy"]
     ).stdout.strip()
+    version = run(["docker", "exec", "lb-haproxy", "haproxy", "-vv"]).stdout
+    if not version.strip():
+        fallback_ref = image_ref or "haproxy:3.4-alpine"
+        version = run(
+            ["docker", "run", "--rm", fallback_ref, "haproxy", "-vv"]
+        ).stdout
     image_id = run(
         ["docker", "inspect", "--format", "{{.Image}}", "lb-haproxy"]
     ).stdout.strip()
