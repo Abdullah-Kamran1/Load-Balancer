@@ -77,6 +77,36 @@ services:
       timeout: 3s
       retries: 3
 
+  # Phase 7: HAProxy reference implementation over the same backend farm.
+  # Profile-gated so a normal `docker compose up -d` keeps the custom proxy's
+  # environment unchanged; run one load balancer at a time:
+  #   docker compose --profile haproxy up -d haproxy
+  # Frontends: :8091 round robin, :8092 least connections, :8093 source IP;
+  # stats + CSV on :8404 (see haproxy/haproxy.cfg).
+  haproxy:
+    image: haproxy:3.4-alpine
+    container_name: lb-haproxy
+    profiles: ["haproxy"]
+    volumes:
+      - ./haproxy/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    ports:
+      - "8091:8091"
+      - "8092:8092"
+      - "8093:8093"
+      - "8404:8404"
+    depends_on:
+      - backend-1
+      - backend-2
+      - backend-3
+      - backend-4
+    networks:
+      - lb-net
+    healthcheck:
+      test: ["CMD-SHELL", "haproxy -c -f /usr/local/etc/haproxy/haproxy.cfg"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
 networks:
   lb-net:
     driver: bridge
