@@ -110,12 +110,14 @@ These cannot be made identical and are reported with benchmark results
   runs (the custom proxy counts client-vanished/internal errors). The CSV
   column is blank, not `0`.
 - **Client aborts count as 4xx**: in the recorded demo run (wrk
-  `-t2 -c10 -d8s`, 10 519 requests) the frontend row reported `4xx: 2`
-  while the backend row reported `4xx: 1` with `cli_abrt: 1`, and no server
+  `-t2 -c10 -d8s`, 10 994 requests) the frontend row reported `4xx: 7`
+  while the backend row reported `4xx: 6` with `cli_abrt: 6`, and no server
   row had a 4xx. These are wrk's end-of-run connection closes, not
   application errors; wrk itself reported no `Non-2xx` line. Do not read
   HAProxy `4xx` as "failed requests" without checking `cli_abrt`/wrk's own
-  error lines.
+  error lines. (The frontend also counts one request that was aborted
+  before it reached a backend, which is why `req_tot` can exceed the
+  backend row by the number of such aborts.)
 - **Stats are cumulative since HAProxy start**. Restart `lb-haproxy`
   before a benchmark run so a run's row contains only that run, or
   subtract a pre-run reading (Phase 8 must do one of these).
