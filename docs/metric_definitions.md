@@ -24,8 +24,8 @@ this document.
 | `wrk_requests_per_sec` | wrk's `Requests/sec` (client-observed throughput). |
 | `wrk_socket_errors` | wrk's `Socket errors: connect/read/write/timeout` counts; `0;0;0;0` flattened when absent. |
 | `wrk_non_2xx` | wrk's `Non-2xx or 3xx responses` count when present (HTTP-level failures wrk saw). |
-| `proxy_requests_total` | Requests the proxy answered (including error responses). Custom: `counters["requests_total"]`. HAProxy: from its statistics page (cumulative since start minus a pre-run reading, or the HC `-D`/stats delta for the window). |
-| `proxy_status_counts` | Exact count per HTTP status the proxy returned (`200:3398;502:4` flattened). Custom: `counters["status_counts"]`. HAProxy: sum of per-frontend/per-backend HTTP response status counters over the window (its stats expose 2xx/4xx/5xx classes; class counts are the comparable form — see notes below). |
+| `proxy_requests_total` | Requests the proxy answered (including error responses). Custom: `counters["requests_total"]`. HAProxy: the selected frontend's `req_tot` (or the backend's when no frontend row is used), which also counts requests that got no server (all DOWN/queued); cumulative since HAProxy started, so restart it or subtract a pre-run reading to isolate a run. |
+| `proxy_status_counts` | Exact count per HTTP status the proxy returned (`200:3398;502:4` flattened). Custom: `counters["status_counts"]`. HAProxy: class counters (`hrsp_1xx`…`hrsp_5xx`) from the same frontend/backend row; class counts are the comparable form — see notes below. |
 | `proxy_errors` | Internal proxy errors that did not become a status (client vanished mid-flight). Custom: `counters["errors"]`. HAProxy: has no direct equivalent; left empty for HAProxy runs. |
 
 ### Status-class note (fair comparison)

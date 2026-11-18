@@ -7,6 +7,8 @@ counters, so these tests pin the parse and the synthesis contract.
 
 import json
 
+import pytest
+
 from load_balancer.metrics.haproxy_stats import (
     parse_haproxy_stats_csv,
     synthesize_snapshot,
@@ -16,16 +18,26 @@ from load_balancer.metrics.wrk_parser import append_combined_csv, parse_wrk_outp
 # Real-shaped export (HAProxy 3.4.7). The live export has ~250 columns;
 # only the consumed columns are shown, because the parser reads by name.
 SAMPLE_CSV = """\
-# pxname,svname,qcur,qmax,scur,smax,slim,stot,status,lastchg,check_status,check_code,check_health,chkfail,chkdown,hrsp_1xx,hrsp_2xx,hrsp_3xx,hrsp_4xx,hrsp_5xx,hrsp_other,addr
-fe_roundrobin,FRONTEND,,,1,2,4096,3,OPEN,0,,,0,0,0,0,22,0,0,2,0,
-be_roundrobin,backend-1,0,1,0,2,,14,UP,120,L7OK,200,4,0,0,0,12,0,0,2,0,172.19.0.2:8000
-be_roundrobin,backend-2,0,0,0,0,,10,UP,30,L7OK,200,4,0,0,0,10,0,0,0,0,172.19.0.3:8000
-be_roundrobin,backend-3,0,0,0,0,,0,DOWN,4,L4CON,0,0,3,1,0,0,0,0,0,0,172.19.0.4:8000
-be_roundrobin,backend-4,0,0,0,0,,0,UP,300,L7OK,200,4,0,0,0,0,0,0,0,0,172.19.0.5:8000
-be_roundrobin,BACKEND,0,1,0,2,,24,UP,300,,,0,3,1,0,22,0,0,2,0,
-fe_leastconn,FRONTEND,,,0,0,4096,0,OPEN,0,,,0,0,0,0,0,0,0,0,0,,
-be_leastconn,backend-1,0,0,0,0,,0,UP,300,L7OK,200,4,0,0,0,0,0,0,0,0,172.19.0.2:8000
-be_leastconn,BACKEND,0,0,0,0,,0,UP,300,,,0,0,0,0,0,0,0,0,0,
+# pxname,svname,qcur,qmax,scur,smax,slim,stot,req_tot,status,lastchg,check_status,check_code,check_health,chkfail,chkdown,hrsp_1xx,hrsp_2xx,hrsp_3xx,hrsp_4xx,hrsp_5xx,hrsp_other,addr
+fe_roundrobin,FRONTEND,,,1,2,4096,3,24,OPEN,0,,,0,0,0,0,22,0,0,2,0,
+be_roundrobin,backend-1,0,1,0,2,,14,14,UP,120,L7OK,200,4,0,0,0,12,0,0,2,0,172.19.0.2:8000
+be_roundrobin,backend-2,0,0,0,0,,10,10,UP,30,L7OK,200,4,0,0,0,10,0,0,0,0,172.19.0.3:8000
+be_roundrobin,backend-3,0,0,0,0,,0,0,DOWN,4,L4CON,0,0,3,1,0,0,0,0,0,0,172.19.0.4:8000
+be_roundrobin,backend-4,0,0,0,0,,0,0,UP,300,L7OK,200,4,0,0,0,0,0,0,0,0,172.19.0.5:8000
+be_roundrobin,BACKEND,0,1,0,2,,24,24,UP,300,,,0,3,1,0,22,0,0,2,0,
+fe_leastconn,FRONTEND,,,0,0,4096,0,0,OPEN,0,,,0,0,0,0,0,0,0,0,0,,
+be_leastconn,backend-1,0,0,0,0,,0,0,UP,300,L7OK,200,4,0,0,0,0,0,0,0,0,172.19.0.2:8000
+be_leastconn,BACKEND,0,0,0,0,,0,0,UP,300,,,0,0,0,0,0,0,0,0,0,
+"""
+
+# A request that never reached a server (all down / refused by HAProxy):
+# the client-facing counters live on the FRONTEND/BACKEND rows, while every
+# server row stays at zero.
+NO_SERVER_CSV = """\
+# pxname,svname,qcur,qmax,scur,smax,slim,stot,req_tot,status,lastchg,check_status,check_code,check_health,chkfail,chkdown,hrsp_1xx,hrsp_2xx,hrsp_3xx,hrsp_4xx,hrsp_5xx,hrsp_other,addr
+fe_roundrobin,FRONTEND,,,0,0,4096,1,1,OPEN,0,,,0,0,0,0,0,0,0,1,0,
+be_roundrobin,backend-1,0,0,0,0,,0,0,DOWN,60,L4CON,0,0,3,1,0,0,0,0,0,0,172.19.0.2:8000
+be_roundrobin,BACKEND,0,0,0,0,,1,1,UP,60,,,0,0,0,0,0,0,0,1,0,
 """
 
 WRK_SAMPLE = """\
@@ -76,6 +88,11 @@ class TestParseHaproxyStats:
     def test_empty_values_parse_as_zero(self):
         stats = parse_haproxy_stats_csv(SAMPLE_CSV)
         assert stats["frontends"]["fe_leastconn"]["stot"] == 0
+
+    def test_req_tot_is_parsed(self):
+        stats = parse_haproxy_stats_csv(SAMPLE_CSV)
+        assert stats["frontends"]["fe_roundrobin"]["req_tot"] == 24
+        assert stats["backends"]["be_roundrobin"]["req_tot"] == 24
 
 
 class TestSynthesizeSnapshot:
@@ -128,6 +145,60 @@ class TestSynthesizeSnapshot:
     def test_connections_total_zero_without_frontend(self):
         snap = self._snap()
         assert snap["proxy"]["counters"]["connections_total"] == 0
+
+    def test_no_server_responses_count_as_requests(self):
+        # FE req_tot=1 / 5xx=1, every server stot=0: a client got a 503.
+        for kwargs in (
+            {"frontend_pxname": "fe_roundrobin"},
+            {},  # no frontend: fall back to the BACKEND row
+        ):
+            snap = synthesize_snapshot(
+                parse_haproxy_stats_csv(NO_SERVER_CSV),
+                strategy_name="roundrobin",
+                **kwargs,
+            )
+            assert snap["proxy"]["counters"]["requests_total"] == 1
+            assert snap["proxy"]["counters"]["responses_5xx"] == 1
+            assert snap["proxy"]["counters"]["status_counts"]["5xx"] == 1
+            assert snap["backends"][0]["total_requests"] == 0
+
+    def test_errors_have_no_haproxy_equivalent(self):
+        assert self._snap()["proxy"]["counters"]["errors"] is None
+
+    def test_transitional_up_status_is_still_healthy(self):
+        # "UP 2/3" means the fall counter is draining but the server is
+        # still in rotation and receiving traffic.
+        text = SAMPLE_CSV.replace(",10,10,UP,30,", ",10,10,UP 2/3,30,")
+        snap = synthesize_snapshot(
+            parse_haproxy_stats_csv(text), strategy_name="roundrobin"
+        )
+        by_id = {b["backend_id"]: b for b in snap["backends"]}
+        assert by_id["backend-2"]["healthy"] is True
+
+    def test_transitional_down_status_is_unhealthy(self):
+        # "DOWN 1/2" is recovering but not yet in rotation.
+        text = SAMPLE_CSV.replace(",0,0,DOWN,4,", ",0,0,DOWN 1/2,4,")
+        snap = synthesize_snapshot(
+            parse_haproxy_stats_csv(text), strategy_name="roundrobin"
+        )
+        by_id = {b["backend_id"]: b for b in snap["backends"]}
+        assert by_id["backend-3"]["healthy"] is False
+
+    def test_unknown_backend_pxname_raises(self):
+        with pytest.raises(ValueError):
+            synthesize_snapshot(
+                parse_haproxy_stats_csv(SAMPLE_CSV),
+                strategy_name="roundrobin",
+                pxname="be_missing",
+            )
+
+    def test_unknown_frontend_pxname_raises(self):
+        with pytest.raises(ValueError):
+            synthesize_snapshot(
+                parse_haproxy_stats_csv(SAMPLE_CSV),
+                strategy_name="roundrobin",
+                frontend_pxname="fe_missing",
+            )
 
     def test_combined_csv_accepts_haproxy_snapshot(self, tmp_path):
         snap = self._snap()

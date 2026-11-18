@@ -17,7 +17,7 @@ What this script does (against Docker Desktop + the compose farm):
 - verifies the post-DOWN batch never touches the victim,
 - restarts the container, waits until the stats report UP and traffic
   returns to it,
-- writes results/structured/haproxy_environment.txt (version + full
+- writes results/structured/haproxy_environment_<run_id>.txt (version + full
   config + hashes) and results/raw/haproxy_acceptance_<run_id>.txt
   (timeline + synthesized snapshot).
 
@@ -55,7 +55,7 @@ VICTIM = "backend-2"
 VICTIM_CONTAINER = "lb-backend-2"
 VICTIM_DIRECT = "http://127.0.0.1:8002/health"
 CONFIG_PATH = REPO_ROOT / "haproxy" / "haproxy.cfg"
-ENV_PATH = REPO_ROOT / "results" / "structured" / "haproxy_environment.txt"
+ENV_DIR = REPO_ROOT / "results" / "structured"
 RAW_DIR = REPO_ROOT / "results" / "raw"
 
 
@@ -98,13 +98,54 @@ def wait_for(pred, timeout: float, step: float = 0.1, what: str = "condition"):
     return False
 
 
-def ensure_stack() -> None:
+def _iso_utc(value: str):
+    """Parse Docker's RFC3339 timestamps (nanoseconds included)."""
+    import re
+    from datetime import datetime, timezone
+
+    match = re.match(r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d+))?Z?$", value)
+    if not match:
+        return None
+    fraction = (match.group(2) or "")[:6].ljust(6, "0")
+    return datetime.strptime(
+        f"{match.group(1)}.{fraction}", "%Y-%m-%dT%H:%M:%S.%f"
+    ).replace(tzinfo=timezone.utc)
+
+
+def ensure_stack(log: list[str] | None = None) -> None:
     info = run(["docker", "info"])
     if info.returncode != 0:
         raise RuntimeError("Docker daemon not reachable")
     up = run(["docker", "compose", "--profile", "haproxy", "up", "-d"])
     if up.returncode != 0:
         raise RuntimeError(f"docker compose up failed: {up.stderr.strip()}")
+
+    # `docker compose up` does not recreate a service when only a
+    # bind-mounted file changes, and HAProxy reads its config once at
+    # process start. Without this check, acceptance could exercise the old
+    # config while save_environment() records the new file's hash forever.
+    started = _iso_utc(
+        run(
+            ["docker", "inspect", "--format", "{{.State.StartedAt}}", "lb-haproxy"]
+        ).stdout.strip()
+    )
+    if started is not None:
+        from datetime import datetime, timezone
+
+        config_mtime = datetime.fromtimestamp(
+            CONFIG_PATH.stat().st_mtime, timezone.utc
+        )
+        if started.timestamp() + 0.5 < config_mtime.timestamp():
+            if log is not None:
+                log.append(
+                    "haproxy process predates haproxy.cfg edit -> restarting so the "
+                    "tested config matches the recorded one"
+                )
+            restarted = run(["docker", "restart", "lb-haproxy"], timeout=60.0)
+            if restarted.returncode != 0:
+                raise RuntimeError(
+                    f"docker restart lb-haproxy failed: {restarted.stderr.strip()}"
+                )
 
     def all_up() -> bool:
         stats = get_stats()
@@ -157,12 +198,31 @@ def frontend_checks(log: list[str]) -> list[str]:
     return failures
 
 
+def env_path(run_id: str):
+    return ENV_DIR / f"haproxy_environment_{run_id}.txt"
+
+
 def save_environment(run_id: str) -> str:
     version = run(["docker", "exec", "lb-haproxy", "haproxy", "-vv"]).stdout
     if not version.strip():
-        version = run(["docker", "run", "--rm", "haproxy:3.4-alpine", "haproxy", "-vv"]).stdout
+        version = run(
+            [
+                "docker",
+                "run",
+                "--rm",
+                "haproxy:3.4-alpine@sha256:b9fe316f718d5015c5cfebd8ca019591f3e44656f61d93cb8b59a1028961e530",
+                "haproxy",
+                "-vv",
+            ]
+        ).stdout
+    image_ref = run(
+        ["docker", "inspect", "--format", "{{.Config.Image}}", "lb-haproxy"]
+    ).stdout.strip()
+    image_id = run(
+        ["docker", "inspect", "--format", "{{.Image}}", "lb-haproxy"]
+    ).stdout.strip()
     digest = run(
-        ["docker", "inspect", "--format", "{{index .RepoDigests 0}}", "haproxy:3.4-alpine"]
+        ["docker", "inspect", "--format", "{{index .RepoDigests 0}}", image_id]
     ).stdout.strip()
     docker_version = run(
         ["docker", "version", "--format", "client={{.Client.Version}} server={{.Server.Version}}"]
@@ -171,13 +231,15 @@ def save_environment(run_id: str) -> str:
     config_text = CONFIG_PATH.read_text(encoding="utf-8")
     config_sha = hashlib.sha256(config_text.encode("utf-8")).hexdigest()
 
-    ENV_PATH.parent.mkdir(parents=True, exist_ok=True)
-    ENV_PATH.write_text(
+    path = env_path(run_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
         "\n".join(
             [
                 f"run_id={run_id}",
                 f"captured_at={time.strftime('%Y-%m-%dT%H:%M:%S', time.localtime())}",
-                "haproxy_image=haproxy:3.4-alpine",
+                f"haproxy_image={image_ref}",
+                f"haproxy_image_id={image_id}",
                 f"haproxy_image_digest={digest}",
                 f"config_path={CONFIG_PATH.relative_to(REPO_ROOT).as_posix()}",
                 f"config_sha256={config_sha}",
@@ -261,15 +323,16 @@ def acceptance(log: list[str]) -> list[str]:
 
     window = [e for e in request_log if t_kill < e["t"] <= t_down]
     failed_in_window = [e for e in window if e["status"] != 200]
+    # Informational, not a pass/fail criterion: between the kill and the
+    # health check flipping DOWN, requests can still be assigned to the
+    # dying server. That is expected behaviour for any LB; failing here
+    # would make the test depend on luck.
     log.append(
         f"detection window: {len(window)} requests, "
-        f"{len(failed_in_window)} failed"
+        f"{len(failed_in_window)} failed while {VICTIM} was still in rotation"
     )
-    if detected and not failed_in_window:
-        failures.append("no request failed during the detection window")
 
     # --- 3: restart -> re-admission
-    t_restart = time.time()
     started = run(["docker", "start", VICTIM_CONTAINER])
     if started.returncode != 0:
         return failures + [f"docker start failed: {started.stderr.strip()}"]
@@ -309,6 +372,11 @@ def acceptance(log: list[str]) -> list[str]:
         log.append(f"post-recovery distribution: {dict(dist)}")
         if sum(1 for s, b in back if s == 200 and b == VICTIM) < 5:
             failures.append(f"re-admitted backend not sustained in rotation: {dict(dist)}")
+        broken = [(s, b) for s, b in back if s != 200]
+        if broken:
+            failures.append(
+                f"post-recovery batch had {len(broken)} failed requests: {broken[:3]}"
+            )
 
     log.append(f"detection time: {t_down - t_kill:.3f}s")
     return failures
@@ -332,7 +400,7 @@ def main() -> int:
 
     try:
         if not args.no_start:
-            ensure_stack()
+            ensure_stack(log)
         stats = get_stats()
         log.append(
             "HAProxy stats reachable; roundrobin servers: "
@@ -346,7 +414,12 @@ def main() -> int:
 
         # snapshot after the run (raw evidence; combined CSV rows are written
         # by scripts/parse_wrk.py --mode haproxy)
-        snap = synthesize_snapshot(get_stats(), "roundrobin", "be_roundrobin")
+        snap = synthesize_snapshot(
+            get_stats(),
+            strategy_name="roundrobin",
+            pxname="be_roundrobin",
+            frontend_pxname="fe_roundrobin",
+        )
         snap_path = RAW_DIR / f"haproxy_snapshot_{run_id}.json"
         snap_path.parent.mkdir(parents=True, exist_ok=True)
         snap_path.write_text(json.dumps(snap, indent=2), encoding="utf-8")
@@ -356,7 +429,9 @@ def main() -> int:
 
     try:
         version = save_environment(run_id)
-        log.append(f"environment saved: {ENV_PATH.relative_to(REPO_ROOT).as_posix()}")
+        log.append(
+            f"environment saved: {env_path(run_id).relative_to(REPO_ROOT).as_posix()}"
+        )
         log.append(f"HAProxy version: {version}")
     except Exception as e:  # noqa: BLE001
         failures.append(f"could not save environment: {type(e).__name__}: {e}")

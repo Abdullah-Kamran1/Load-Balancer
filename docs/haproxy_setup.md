@@ -1,6 +1,6 @@
 # HAProxy reference setup (Phase 7)
 
-HAProxy 3.4.7 runs as `lb-haproxy` (`haproxy:3.4-alpine`, digest
+HAProxy 3.4.7 runs as `lb-haproxy` (`haproxy:3.4-alpine`, pinned by digest
 `sha256:b9fe316f718d5015c5cfebd8ca019591f3e44656f61d93cb8b59a1028961e530`)
 on the same Docker network and backend farm as the custom proxy.
 
@@ -18,6 +18,15 @@ docker stop lb-haproxy
 docker exec lb-haproxy haproxy -vv
 docker exec lb-haproxy haproxy -c -f /usr/local/etc/haproxy/haproxy.cfg
 ```
+
+The image reference is pinned by digest in `docker-compose.yml` so every
+run uses the exact build whose version/config are recorded. Note that the
+Compose healthcheck only syntax-checks the *mounted* file; it cannot tell
+that a running HAProxy process still has the previous config loaded.
+`scripts/haproxy_acceptance.py` handles that: if `lb-haproxy` started
+before `haproxy.cfg` was last modified, it restarts the container before
+testing (and therefore also starts from zeroed counters). After editing the
+config by hand, run `docker restart lb-haproxy`.
 
 | Port | Frontend | Balance directive |
 |---:|---|---|
@@ -58,7 +67,7 @@ equivalence where semantics differ):
 
 | Custom proxy setting | HAProxy directive |
 |---|---|
-| `GET /health`, success = HTTP 200 | `option httpchk GET /health` + `http-check expect status 200` |
+| `GET /health`, success = HTTP 200 | `option httpchk GET /health HTTP/1.1` + `http-check expect status 200` (explicit HTTP/1.1, matching the custom monitor's h11 request) |
 | `LB_HEALTH_INTERVAL=1.0` | `default-server inter 1s` |
 | `LB_HEALTH_TIMEOUT=1.0` | `timeout check 1s` |
 | `LB_HEALTH_FAILURES=3` → DOWN | `fall 3` |
@@ -69,16 +78,20 @@ equivalence where semantics differ):
 | no upstream retry | `retries 0` |
 
 HAProxy reports transitional health as `UP 2/3`, `UP 1/3` while the fall
-counter drains; only `DOWN` means removed from rotation (`DOWN 1/2` is the
-mirror during recovery). Acceptance logic must test `status == "UP"` /
-`status.startswith("DOWN")`, not merely "not UP".
+counter drains — the server is still in rotation and receives traffic — and
+`DOWN 1/2` while it recovers without yet receiving traffic. So:
+`healthy` (snapshot/backends.csv) is `status.startswith("UP")`, acceptance
+DOWN-detection is `status.startswith("DOWN")`, and UP-waiting is
+`status == "UP"`. "Not UP" is not the same as DOWN.
 
 Observed on this Windows/Docker host: a killed backend's address silently
 drops connects, so each failed probe consumes `timeout check 1s` and then
-waits `inter 1s`. DOWN therefore lands at ≈ `3 x (1s + 1s)`, the same
-mechanism documented for the custom proxy. Measured acceptance run:
-**4.09 s** kill → DOWN, 3 failed client requests in the window, re-admitted
-2.47 s after the restarted container served `/health`, then ~25 % share.
+waits `inter 1s`; HAProxy's check scheduling adds up to one `inter` of
+phase, so DOWN lands roughly 4–6 s after the kill. Measured acceptance
+runs: **4.09 s, 5.34 s, 5.52 s** kill → DOWN (request-assignment phase
+changes the value run to run), with the victim still receiving traffic
+only until the health check flips it. Re-admission: ~2.4 s after the
+restarted container served `/health`, then ~25 % share.
 
 ## Recorded configuration/measurement differences
 
@@ -93,12 +106,15 @@ These cannot be made identical and are reported with benchmark results
 - **Status detail**: HAProxy exposes class counters (`hrsp_2xx`…`hrsp_5xx`),
   the custom proxy exact statuses. Comparisons use class aggregates
   (`docs/metric_definitions.md`).
-- **Client aborts count as 4xx**: in the demo run (wrk `-t2 -c10 -d8s`,
-  11 135 requests) HAProxy reported `4xx: 5` with `cli_abrt: 5` on the
-  backend row and no corresponding server-side 4xx. These are wrk's
-  end-of-run connection closes, not application errors; wrk itself
-  reported no `Non-2xx` line. Do not read HAProxy `4xx` as "failed
-  requests" without checking `cli_abrt`/wrk's own error lines.
+- **No internal-error counter**: `proxy_errors` is left empty for HAProxy
+  runs (the custom proxy counts client-vanished/internal errors). The CSV
+  column is blank, not `0`.
+- **Client aborts count as 4xx**: in the recorded demo run (wrk
+  `-t2 -c10 -d8s`, 10 519 requests) HAProxy reported `4xx: 2` with
+  `cli_abrt: 2` on the backend row and no corresponding server-side 4xx.
+  These are wrk's end-of-run connection closes, not application errors;
+  wrk itself reported no `Non-2xx` line. Do not read HAProxy `4xx` as
+  "failed requests" without checking `cli_abrt`/wrk's own error lines.
 - **Stats are cumulative since HAProxy start**. Restart `lb-haproxy`
   before a benchmark run so a run's row contains only that run, or
   subtract a pre-run reading (Phase 8 must do one of these).
@@ -107,10 +123,32 @@ These cannot be made identical and are reported with benchmark results
   percentiles empty; cross-implementation latency uses wrk-side numbers.
 - **Host header**: the custom proxy rewrites `Host` to the backend; HAProxy
   forwards the client's `Host` unchanged. The test backends ignore it.
-- **Frontend `stot` is connections**, while server `stot` is
-  requests/sessions under `http-server-close`. The snapshot synthesizer
-  takes `connections_total` from the FRONTEND row and request counts from
-  the server rows.
+- **Connection/request counters**: a FRONTEND row's `stot` counts client
+  connections (e.g. 11 for a 10+1-connection wrk run) while server `stot`
+  counts requests/sessions under `http-server-close`. `connections_total`
+  therefore comes from the FRONTEND row; `requests_total` and the status
+  classes come from that row's `req_tot`/`hrsp_*` (or the BACKEND row when
+  no frontend is named), because a request that found no server (all DOWN/
+  queued) never appears on a server row. Shares use the server rows.
+- **Topology**: the custom proxy is a host process reached at
+  `127.0.0.1:8000+`; HAProxy is a container on `lb-net` reached via a
+  published port. Client→LB hop and LB→backend network path differ
+  accordingly. `backends.csv` `host`/`port` therefore also differ in
+  meaning: custom rows record the published backend endpoints, HAProxy rows
+  the container IP:port HAProxy talks to. Shares/counts are unaffected.
+- **Health-check volume**: one HAProxy container runs three backends'
+  check sections, so each backend sees three probes per second (one per
+  frontend) vs one per second from the custom monitor. `/health` bypasses
+  the request semaphore, so capacity is unaffected.
+- **Backend address resolution is static**: `server backend-N
+  backend-N:8000` is resolved when HAProxy starts. `docker kill`/`start`
+  keeps a container's IP, so failure/recovery works; a **recreated**
+  backend (`compose up` after a config change, `--force-recreate`) gets a
+  new IP and HAProxy keeps probing the old one. Restart `lb-haproxy` after
+  recreating backends (Phase 8 must do this).
+- **Run one load balancer at a time**: profile-gating keeps the compose
+  environment unchanged, but if the custom proxy is running on the host,
+  stop it before an HAProxy run so only one LB serves the backends.
 
 ## Acceptance + evidence
 
@@ -119,9 +157,10 @@ routing contract, kills `lb-backend-2` under traffic on `:8091`, waits for
 stats `DOWN`, checks post-DOWN routing, restarts the container, waits for
 `UP` and sustained ~25 % traffic, then writes:
 
-- `results/structured/haproxy_environment.txt` — image, exact version,
-  full `haproxy -vv`, config hash, verbatim config, Docker/git versions
-  (tracked with benchmark results);
+- `results/structured/haproxy_environment_<run_id>.txt` — image reference
+  + id + digest, exact version, full `haproxy -vv`, config hash, verbatim
+  config, Docker/git versions (tracked with benchmark results; one file per
+  run so earlier evidence is never overwritten);
 - `results/raw/haproxy_acceptance_<run_id>.txt` — timeline and failures;
 - `results/raw/haproxy_snapshot_<run_id>.json` — synthesized snapshot.
 
@@ -137,13 +176,15 @@ docker run --rm lb/wrk -t2 -c10 -d60s --latency `
 .\.venv\Scripts\python.exe -c @"
 import sys; sys.path.insert(0, '.')
 from pathlib import Path
-from scripts.haproxy_acceptance import get_stats
+from scripts.haproxy_acceptance import get_stats, save_environment
 from load_balancer.metrics.haproxy_stats import synthesize_snapshot
 from load_balancer.metrics import write_json, append_backends_csv
-snap = synthesize_snapshot(get_stats(), 'roundrobin', 'be_roundrobin',
+snap = synthesize_snapshot(get_stats(), strategy_name='roundrobin',
+                           pxname='be_roundrobin',
                            frontend_pxname='fe_roundrobin')
 write_json(snap, Path('results/raw/haproxy_snapshot_$runId.json'))
 append_backends_csv(snap, Path('results/structured/backends.csv'), run_id='$runId')
+save_environment('$runId')
 "@
 
 .\.venv\Scripts\python.exe scripts\parse_wrk.py `
@@ -151,3 +192,10 @@ append_backends_csv(snap, Path('results/structured/backends.csv'), run_id='$runI
   --snapshot "results/raw/haproxy_snapshot_$runId.json" `
   --run-id $runId --mode haproxy
 ```
+
+For a `leastconn` or `source` run, use that frontend's port and the matching
+names: `strategy_name='leastconn', pxname='be_leastconn',
+frontend_pxname='fe_leastconn'` (`8092`), or `strategy_name='source',
+pxname='be_source', frontend_pxname='fe_source'` (`8093`). The synthesizer
+raises `ValueError` on an unknown pxname, so a typo cannot silently record
+zero counters.

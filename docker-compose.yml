@@ -84,7 +84,9 @@ services:
   # Frontends: :8091 round robin, :8092 least connections, :8093 source IP;
   # stats + CSV on :8404 (see haproxy/haproxy.cfg).
   haproxy:
-    image: haproxy:3.4-alpine
+    # Pinned by digest so every benchmark run uses the exact image whose
+    # version/config are recorded (the tag alone can move to a new patch).
+    image: haproxy:3.4-alpine@sha256:b9fe316f718d5015c5cfebd8ca019591f3e44656f61d93cb8b59a1028961e530
     container_name: lb-haproxy
     profiles: ["haproxy"]
     volumes:

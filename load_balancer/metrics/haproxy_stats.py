@@ -5,7 +5,9 @@ dict shaped like collect_run_snapshot()'s output. HAProxy's stats CSV is
 the only machine-readable source for its per-run counters, so this module
 parses it and synthesizes that shape:
 
-- proxy.counters from the backend row (hrsp_* classes, stot),
+- proxy.counters from the client-facing row: the frontend's req_tot and
+  hrsp_* classes when a frontend pxname is given (counts responses that got
+  no server too), otherwise the BACKEND row,
 - proxy.latency_ms empty: HAProxy exposes averages, not percentiles; the
   fair cross-implementation latency numbers are wrk-side (documented in
   docs/metric_definitions.md),
@@ -43,6 +45,7 @@ def parse_haproxy_stats_csv(text: str) -> dict:
             "chkfail": _int(row.get("chkfail")),
             "chkdown": _int(row.get("chkdown")),
             "stot": _int(row.get("stot")),
+            "req_tot": _int(row.get("req_tot")),
             "scur": _int(row.get("scur")),
             "smax": _int(row.get("smax")),
             "lastchg": _int(row.get("lastchg")),
@@ -79,14 +82,29 @@ def synthesize_snapshot(
     """
     servers = stats["servers"].get(pxname, {})
     backend_row = stats["backends"].get(pxname, {})
+    if pxname not in stats["backends"]:
+        raise ValueError(
+            f"HAProxy stats have no backend {pxname!r}; "
+            f"available: {sorted(stats['backends'])}"
+        )
+    if frontend_pxname is not None and frontend_pxname not in stats["frontends"]:
+        raise ValueError(
+            f"HAProxy stats have no frontend {frontend_pxname!r}; "
+            f"available: {sorted(stats['frontends'])}"
+        )
+    frontend_row = (
+        stats["frontends"].get(frontend_pxname, {}) if frontend_pxname else {}
+    )
+    # Client-facing counters: a FRONTEND row (preferred) or the BACKEND row
+    # counts requests that never got a server (all DOWN / queue), while the
+    # sum of server stot only covers delivered requests.
+    client_row = frontend_row or backend_row
     total = sum(s["stot"] for s in servers.values())
+    requests_total = client_row.get("req_tot") or backend_row.get("stot", 0)
+    status_counts = dict(client_row.get("status_counts", {}))
     # A FRONTEND row's stot counts client connections; a backend/server
     # stot counts sessions (one per request here because of http-server-close).
-    connections = (
-        stats["frontends"].get(frontend_pxname, {}).get("stot", 0)
-        if frontend_pxname
-        else 0
-    )
+    connections = frontend_row.get("stot", 0)
 
     backends = []
     for backend_id, server in servers.items():
@@ -96,7 +114,9 @@ def synthesize_snapshot(
                 "backend_id": backend_id,
                 "host": host,
                 "port": _int(port),
-                "healthy": server["status"] == "UP",
+                # "UP 2/3" / "UP 1/3" still receive traffic while the fall
+                # counter drains; "DOWN 1/2" does not yet receive traffic.
+                "healthy": server["status"].startswith("UP"),
                 "total_requests": server["stot"],
                 "active_requests": server["scur"],
                 "share_pct": (
@@ -117,12 +137,14 @@ def synthesize_snapshot(
         },
         "proxy": {
             "counters": {
-                "requests_total": total,
+                "requests_total": requests_total,
                 "connections_total": connections,
-                "responses_5xx": backend_row.get("status_counts", {}).get("5xx", 0),
-                "errors": 0,
+                "responses_5xx": status_counts.get("5xx", 0),
+                # HAProxy has no equivalent for internal errors that never
+                # became a status (docs/metric_definitions.md).
+                "errors": None,
                 # class aggregates: the comparable form (docs/metric_definitions.md)
-                "status_counts": dict(backend_row.get("status_counts", {})),
+                "status_counts": dict(status_counts),
             },
             "latency_ms": {
                 "samples": 0,
