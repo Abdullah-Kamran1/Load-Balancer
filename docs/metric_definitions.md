@@ -36,6 +36,12 @@ status_counts[200..299] summed`, `5xx = status_counts[500..599] summed`
 (custom) vs. HAProxy's `hrsp_2xx` / `hrsp_5xx`. The per-status detail is
 kept for custom-run diagnosis only.
 
+HAProxy caveats (Phase 7): its `hrsp_4xx` includes client-aborted requests
+(see `cli_abrt`; e.g. wrk closing connections at the end of a run), so a
+nonzero 4xx class is not by itself an application failure. Its counters are
+cumulative since HAProxy started; restart the container before a run (or
+subtract a pre-run reading) so a row describes only that run.
+
 ## Latency (per run)
 
 | Metric | Definition |

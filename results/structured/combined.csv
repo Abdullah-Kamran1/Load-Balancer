@@ -1,2 +1,3 @@
 run_id,run_started_at,mode,strategy,threads,connections,duration_s,wrk_requests,wrk_requests_per_sec,wrk_p50_ms,wrk_p75_ms,wrk_p90_ms,wrk_p99_ms,wrk_thread_latency_avg_ms,wrk_socket_errors,wrk_non_2xx,proxy_requests_total,proxy_responses_5xx,proxy_errors,proxy_status_counts,proxy_p50_ms,proxy_p95_ms,proxy_p99_ms,backend_shares
 20261117-171058,2026-11-17T12:11:14,custom,round_robin,2,10,8.01,5364,670.0,14.66,15.77,17.11,20.51,14.9,,,5375,0,0,200:5375,14.55,17.91,20.34300000000001,backend-1:25.0;backend-2:25.0;backend-3:25.0;backend-4:24.99
+20261118-211248,2026-11-18T16:13:04,haproxy,roundrobin,2,10,8.01,11135,1390.06,7.08,7.61,8.13,9.27,7.18,,,11144,0,0,1xx:0;2xx:11139;3xx:0;4xx:5;5xx:0,,,,backend-1:25.0;backend-2:25.01;backend-3:25.0;backend-4:24.99

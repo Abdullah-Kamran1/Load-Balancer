@@ -17,7 +17,7 @@ from load_balancer.metrics.wrk_parser import append_combined_csv, parse_wrk_outp
 # only the consumed columns are shown, because the parser reads by name.
 SAMPLE_CSV = """\
 # pxname,svname,qcur,qmax,scur,smax,slim,stot,status,lastchg,check_status,check_code,check_health,chkfail,chkdown,hrsp_1xx,hrsp_2xx,hrsp_3xx,hrsp_4xx,hrsp_5xx,hrsp_other,addr
-fe_roundrobin,FRONTEND,,,1,2,4096,24,OPEN,0,,,0,0,0,0,22,0,0,2,0,
+fe_roundrobin,FRONTEND,,,1,2,4096,3,OPEN,0,,,0,0,0,0,22,0,0,2,0,
 be_roundrobin,backend-1,0,1,0,2,,14,UP,120,L7OK,200,4,0,0,0,12,0,0,2,0,172.19.0.2:8000
 be_roundrobin,backend-2,0,0,0,0,,10,UP,30,L7OK,200,4,0,0,0,10,0,0,0,0,172.19.0.3:8000
 be_roundrobin,backend-3,0,0,0,0,,0,DOWN,4,L4CON,0,0,3,1,0,0,0,0,0,0,172.19.0.4:8000
@@ -112,6 +112,22 @@ class TestSynthesizeSnapshot:
         snap = self._snap("be_leastconn")
         assert snap["proxy"]["counters"]["requests_total"] == 0
         assert all(b["share_pct"] == 0.0 for b in snap["backends"])
+
+    def test_connections_total_comes_from_frontend_row(self):
+        # FRONTEND stot counts client connections (3), while server stot
+        # counts requests/sessions (24); the metric contract calls this
+        # connections_total.
+        snap = synthesize_snapshot(
+            parse_haproxy_stats_csv(SAMPLE_CSV),
+            strategy_name="roundrobin",
+            pxname="be_roundrobin",
+            frontend_pxname="fe_roundrobin",
+        )
+        assert snap["proxy"]["counters"]["connections_total"] == 3
+
+    def test_connections_total_zero_without_frontend(self):
+        snap = self._snap()
+        assert snap["proxy"]["counters"]["connections_total"] == 0
 
     def test_combined_csv_accepts_haproxy_snapshot(self, tmp_path):
         snap = self._snap()

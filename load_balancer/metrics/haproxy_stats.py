@@ -69,6 +69,7 @@ def synthesize_snapshot(
     strategy_name: str,
     pxname: str = "be_roundrobin",
     captured_at: str | None = None,
+    frontend_pxname: str | None = None,
 ) -> dict:
     """Build the collect_run_snapshot()-shaped dict from parsed stats.
 
@@ -79,6 +80,13 @@ def synthesize_snapshot(
     servers = stats["servers"].get(pxname, {})
     backend_row = stats["backends"].get(pxname, {})
     total = sum(s["stot"] for s in servers.values())
+    # A FRONTEND row's stot counts client connections; a backend/server
+    # stot counts sessions (one per request here because of http-server-close).
+    connections = (
+        stats["frontends"].get(frontend_pxname, {}).get("stot", 0)
+        if frontend_pxname
+        else 0
+    )
 
     backends = []
     for backend_id, server in servers.items():
@@ -110,7 +118,7 @@ def synthesize_snapshot(
         "proxy": {
             "counters": {
                 "requests_total": total,
-                "connections_total": backend_row.get("stot", total),
+                "connections_total": connections,
                 "responses_5xx": backend_row.get("status_counts", {}).get("5xx", 0),
                 "errors": 0,
                 # class aggregates: the comparable form (docs/metric_definitions.md)
