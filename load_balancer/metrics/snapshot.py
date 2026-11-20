@@ -17,8 +17,65 @@ in Phase 7):
 
 import csv
 import json
+import sys
 import time
 from pathlib import Path
+
+
+def process_usage() -> dict:
+    """CPU seconds and RSS of THIS process (stdlib only).
+
+    Windows counters (Get-Process/WMI) report 0 CPU time for processes
+    spawned by some harnesses, so the custom proxy records its own
+    process_time() in the 1 s metrics dump; the Phase 8 sampler takes the
+    delta between dumps.
+    """
+    result = {"process_cpu_seconds": round(time.process_time(), 3),
+              "process_rss_mib": None}
+    rss_bytes = None
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            class PROCESS_MEMORY_COUNTERS(ctypes.Structure):
+                _fields_ = [
+                    ("cb", wintypes.DWORD), ("PageFaultCount", wintypes.DWORD),
+                    ("PeakWorkingSetSize", ctypes.c_size_t),
+                    ("WorkingSetSize", ctypes.c_size_t),
+                    ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                    ("PagefileUsage", ctypes.c_size_t),
+                    ("PeakPagefileUsage", ctypes.c_size_t),
+                ]
+
+            psapi = ctypes.WinDLL("psapi", use_last_error=True)
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+            psapi.GetProcessMemoryInfo.argtypes = [
+                wintypes.HANDLE, ctypes.POINTER(PROCESS_MEMORY_COUNTERS), wintypes.DWORD
+            ]
+            counters = PROCESS_MEMORY_COUNTERS()
+            counters.cb = ctypes.sizeof(counters)
+            if psapi.GetProcessMemoryInfo(
+                kernel32.GetCurrentProcess(), ctypes.byref(counters), counters.cb
+            ):
+                rss_bytes = counters.WorkingSetSize
+        except (OSError, AttributeError, TypeError):
+            pass
+    else:
+        try:
+            for line in Path("/proc/self/status").read_text().splitlines():
+                if line.startswith("VmRSS:"):
+                    rss_bytes = int(line.split()[1]) * 1024
+                    break
+        except OSError:
+            pass
+    if rss_bytes:
+        result["process_rss_mib"] = round(rss_bytes / 1048576, 2)
+    return result
 
 
 def percentile(samples: list[float], p: float) -> float | None:
@@ -66,6 +123,7 @@ def collect_run_snapshot(
         "strategy": strategy_name,
         "run_started_at": time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()),
     }
+    meta.update(process_usage())
     if started_at is not None:
         meta["duration_s"] = round(time.time() - started_at, 3)
     return {

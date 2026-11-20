@@ -97,6 +97,8 @@ class TestLatencySamples:
 
 import json
 
+from types import SimpleNamespace
+
 from load_balancer.metrics import (
     append_backends_csv,
     append_summary_csv,
@@ -122,6 +124,15 @@ class TestPercentile:
 
 
 class TestRunSnapshot:
+    def test_snapshot_includes_in_process_cpu_and_memory(self):
+        # Windows reports 0 CPU time via Get-Process/WMI for harness-spawned
+        # processes; the proxy must record its own process_time() in the dump.
+        proxy = SimpleNamespace(counters={}, latencies_ms=[])
+        registry = SimpleNamespace(snapshot=lambda: [])
+        snap = collect_run_snapshot(proxy, registry, strategy_name="round_robin")
+        assert snap["meta"]["process_cpu_seconds"] >= 0
+        assert snap["meta"]["process_rss_mib"] > 0
+
     async def test_snapshot_structure_and_shares(self, fake_backend_factory):
         fb1 = await fake_backend_factory()
         fb2 = await fake_backend_factory()
