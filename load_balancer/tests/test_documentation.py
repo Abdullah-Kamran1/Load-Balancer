@@ -27,3 +27,16 @@ def test_created_files_have_reference_sections():
     assert created, "no files discovered"
     missing = [path for path in created if f"`{path}`" not in reference]
     assert missing == []
+
+
+def test_flow_overview_covers_all_states_and_pipelines():
+    root = repo_root()
+    flow = (root / "docs" / "ARCHITECTURE_FLOW.md").read_text(encoding="utf-8")
+    required = [
+        "START", "READ_REQUEST", "SELECT_BACKEND", "FORWARD", "DRAIN_RESPONSE",
+        "UNHEALTHY", "RECOVERING", "UP", "DOWN", "UP n/m", "DOWN n/m",
+        "metrics dump", "combined.csv", "baseline_medians.csv",
+        "failure_timeline.svg", "final_report.md",
+    ]
+    assert [token for token in required if token not in flow] == []
+    assert flow.count("```mermaid") >= 2
