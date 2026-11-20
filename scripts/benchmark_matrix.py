@@ -68,7 +68,8 @@ MANIFEST_HEADER = [
 ]
 FAILURES_HEADER = [
     "run_id", "mode", "strategy", "clients", "victim", "kill_at_s",
-    "detection_s", "failed_requests", "wrk_non_2xx", "recovery_s", "readmitted",
+    "detection_s", "failed_detection", "failed_after_kill_30s", "wrk_non_2xx",
+    "recovery_s", "readmitted",
 ]
 
 
@@ -299,6 +300,12 @@ def restart_haproxy() -> None:
 
     if not wait_for(all_up, timeout=60, step=0.2, what="all HAProxy backends UP"):
         raise RuntimeError("HAProxy never saw all backends UP after restart")
+    # Published ports can lag the stats socket briefly; require a real HTTP
+    # response through each frontend before any benchmark starts.
+    for port in (8091, 8092, 8093):
+        if not wait_for(lambda p=port: http_ok(f"http://127.0.0.1:{p}/health"),
+                        timeout=30, step=0.5, what=f"HAProxy frontend :{port}"):
+            raise RuntimeError(f"HAProxy frontend :{port} never served HTTP")
 
 
 def run_wrk(case: Case, run_id: str, duration_s: int, *, warmup: bool = False) -> dict:

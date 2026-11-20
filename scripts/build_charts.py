@@ -34,7 +34,7 @@ COLORS = ["#1f77b4", "#d62728", "#2ca02c", "#9467bd",
 
 MEDIANS_HEADER = [
     "run_id", "mode", "strategy", "clients", "runs", "threads",
-    "rps_median", "p50_median", "p95_median", "p99_median",
+    "rps_median", "p50_median", "p75_median", "p90_median", "p99_median",
     "proxy_requests_median", "responses_5xx_median",
     "lb_cpu_pct_mean", "lb_mem_mib_mean", "wrk_cpu_pct_mean", "backend_shares",
 ]
@@ -57,8 +57,26 @@ def _parse_shares(text: str) -> dict[str, float]:
     return shares
 
 
+def _status_class_5xx(text: str) -> int:
+    """5xx class aggregate from proxy_status_counts (comparable across LBs).
+
+    HAProxy emits class keys ("5xx:N"); the custom proxy emits exact status
+    keys ("503:N"), so sum both forms.
+    """
+    total = 0
+    for part in (text or "").split(";"):
+        if ":" not in part:
+            continue
+        key, value = part.split(":", 1)
+        if key == "5xx" or (key.isdigit() and 500 <= int(key) <= 599):
+            total += int(value)
+    return total
+
+
 def baseline_rows(manifest: Path, combined: Path) -> list[dict]:
-    by_run = {row[0]: row for row in _raw_rows(combined)}
+    # Name-based lookup: positional indexes previously mislabelled wrk p75/p90
+    # as p95/p99 (COMBINED_HEADER has p75 and p90 between p50 and p99).
+    by_run = {row["run_id"]: row for row in _read_csv(combined)}
     rows = []
     for record in _read_csv(manifest):
         if record["phase"] != "baseline" or record["run_id"] not in by_run:
@@ -70,19 +88,16 @@ def baseline_rows(manifest: Path, combined: Path) -> list[dict]:
             "strategy": record["strategy"],
             "clients": int(record["clients"]),
             "threads": int(record["threads"]),
-            "rps": float(wrk[8]),
-            "p50": float(wrk[9]),
-            "p95": float(wrk[10]),
-            "p99": float(wrk[11]),
-            "requests": int(wrk[7]),
-            "errors": int(wrk[17] or 0),
-            "shares": _parse_shares(wrk[23] if len(wrk) > 23 else ""),
+            "rps": float(wrk["wrk_requests_per_sec"] or 0),
+            "p50": float(wrk["wrk_p50_ms"] or 0),
+            "p75": float(wrk["wrk_p75_ms"] or 0),
+            "p90": float(wrk["wrk_p90_ms"] or 0),
+            "p99": float(wrk["wrk_p99_ms"] or 0),
+            "requests": int(wrk["wrk_requests"] or 0),
+            "errors": _status_class_5xx(wrk["proxy_status_counts"]),
+            "shares": _parse_shares(wrk["backend_shares"]),
         })
     return rows
-
-
-def _raw_rows(path: Path) -> list[list[str]]:
-    return list(csv.reader(path.read_text(encoding="utf-8").splitlines()))[1:]
 
 
 def _median(values: list[float]) -> float:
@@ -101,11 +116,14 @@ def aggregate_medians(rows: list[dict]) -> list[dict]:
             "runs": len(group), "threads": group[0]["threads"],
             "rps": _median([r["rps"] for r in group]),
             "p50": _median([r["p50"] for r in group]),
-            "p95": _median([r["p95"] for r in group]),
+            "p75": _median([r["p75"] for r in group]),
+            "p90": _median([r["p90"] for r in group]),
             "p99": _median([r["p99"] for r in group]),
             "requests": _median([r["requests"] for r in group]),
             "errors": _median([r["errors"] for r in group]),
-            "shares": group[0]["shares"],
+            "shares": {
+                b: _median([r["shares"].get(b, 0.0) for r in group]) for b in BACKENDS
+            },
         })
     return summary
 
@@ -244,7 +262,7 @@ def write_environment(path: Path) -> None:
         )
         return result.stdout.strip()
 
-    docker_version = ps("docker version --format 'client={{.Client.Version}}'")
+    docker_version = ps("docker version --format '{{.Client.Version}} {{.Server.Version}}'")
     haproxy_env = sorted(STRUCTURED.glob("haproxy_environment_*.txt"))
     haproxy_version = "not captured"
     if haproxy_env:
@@ -297,7 +315,7 @@ def main() -> int:
         wrk_cpu, _ = lb_means.get((*key, "wrk"), (None, None))
         out_rows.append([
             row["run_id"], row["mode"], row["strategy"], row["clients"], row["runs"],
-            row["threads"], row["rps"], row["p50"], row["p95"], row["p99"],
+            row["threads"], row["rps"], row["p50"], row["p75"], row["p90"], row["p99"],
             row["requests"], row["errors"], lb_cpu, lb_mem, wrk_cpu,
             ";".join(f"{b}:{row['shares'].get(b, 0.0)}" for b in BACKENDS),
         ])
@@ -310,19 +328,26 @@ def main() -> int:
     write_environment(STRUCTURED / "benchmark_environment.txt")
     PLOTS.mkdir(parents=True, exist_ok=True)
     categories = ["50", "200", "500"]
-    for metric in ("rps", "p50", "p95", "p99"):
+    for metric in ("rps", "p50", "p75", "p90", "p99"):
         series = []
         for mode in ("custom", "haproxy"):
             for strategy in sorted({r["strategy"] for r in summary if r["mode"] == mode}):
                 values = [
                     next((r[metric] for r in summary
                           if r["mode"] == mode and r["strategy"] == strategy
-                          and r["clients"] == int(c)), 0)
+                          and r["clients"] == int(c)), None)
                     for c in categories
                 ]
+                if any(v is None for v in values):
+                    continue  # never draw a fabricated zero for a missing case
                 series.append((f"{mode}-{strategy}", values))
-        title = {"rps": "Median requests/sec", "p50": "Median p50 latency (ms)",
-                 "p95": "Median p95 latency (ms)", "p99": "Median p99 latency (ms)"}[metric]
+        title = {
+            "rps": "Median requests/sec",
+            "p50": "Median wrk p50 latency (ms)",
+            "p75": "Median wrk p75 latency (ms)",
+            "p90": "Median wrk p90 latency (ms)",
+            "p99": "Median wrk p99 latency (ms)",
+        }[metric]
         (PLOTS / f"{metric}_by_load.svg").write_text(
             line_chart_svg(title, categories, series), encoding="utf-8"
         )
@@ -340,11 +365,20 @@ def main() -> int:
             encoding="utf-8",
         )
         (PLOTS / "failure_requests.svg").write_text(
-            bar_chart_svg("Failed requests during backend failure", labels,
-                          [("5xx/502/503",
-                            [float(r["failed_requests"] or 0) for r in failures], "#1f77b4")]),
+            bar_chart_svg("5xx in the 30 s after the kill", labels,
+                          [("5xx class",
+                            [float(r.get("failed_after_kill_30s", 0)) for r in failures],
+                            "#1f77b4")]),
             encoding="utf-8",
         )
+        if "failed_detection" in failures[0]:
+            (PLOTS / "failure_detection_window.svg").write_text(
+                bar_chart_svg("5xx between kill and DOWN", labels,
+                              [("detection window",
+                                [float(r["failed_detection"] or 0) for r in failures],
+                                "#ff7f0e")]),
+                encoding="utf-8",
+            )
     print(f"wrote {len(out_rows)} median rows, {len(list(PLOTS.glob('*.svg')))} charts")
     return 0
 

@@ -1,6 +1,6 @@
-captured_at=2026-11-20T16:45:57
+captured_at=2026-11-20T17:12:20
 python_version=3.15.2
-docker_version=client=29.9.3
+docker_version=29.9.3 29.9.3
 cpu=12th Gen Intel(R) Core(TM) i7-12700H
 logical_cpus=20
 ram_gib=15.71

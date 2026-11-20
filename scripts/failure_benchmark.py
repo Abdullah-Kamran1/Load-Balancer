@@ -1,6 +1,6 @@
 """Phase 8: timed backend-failure and recovery benchmark.
 
-For each mode/algorithm at 200 clients: start a 60 s wrk run, kill
+For each mode/algorithm at 50 clients: start a 60 s wrk run, kill
 lb-backend-2 at t=30 s, keep the load running, capture health transitions
 and request failures, then restart the backend in a separate recovery
 check. The victim and timing are identical for the custom proxy and
@@ -34,10 +34,7 @@ VICTIM_CONTAINER = "lb-backend-2"
 FAILURE_CLIENTS = 50
 RAW_DIR = REPO_ROOT / "results" / "raw"
 STRUCTURED_DIR = REPO_ROOT / "results" / "structured"
-FAILURES_HEADER = [
-    "run_id", "mode", "strategy", "clients", "victim", "kill_at_s",
-    "detection_s", "failed_requests", "wrk_non_2xx", "recovery_s", "readmitted",
-]
+FAILURES_HEADER = bm.FAILURES_HEADER
 
 
 def failure_cases() -> list:
@@ -72,13 +69,22 @@ def status_counter_delta(before: dict, after: dict, statuses) -> int:
     return sum(after.get(s, 0) - before.get(s, 0) for s in statuses)
 
 
+def detection_failure_delta(before: int, at_down: int) -> int:
+    """5xx responses between the kill and the first DOWN state."""
+    return at_down - before
+
+
 def recovery_ok(counts: dict, victim: str, min_hits: int = 5,
-                sticky: bool = False) -> bool:
+                sticky: bool = False, healthy: bool = True) -> bool:
     # Sticky strategies pin a client IP to one backend; a healthy victim
     # need not receive any traffic from that single test client.
     if sticky:
-        return True
+        return healthy
     return counts.get(victim, 0) >= min_hits
+
+
+def wrk_output_valid(text: str) -> bool:
+    return "requests in" in text
 
 
 def http_get(url: str, timeout: float = 3.0) -> tuple[int, str]:
@@ -99,6 +105,7 @@ class HealthWatcher:
         self.dump = dump
         self.down_at: float | None = None
         self.up_at: float | None = None
+        self.error_at_down: int | None = None
         self.last_status = "UP"
         self.armed = False
         self._stop = threading.Event()
@@ -123,6 +130,12 @@ class HealthWatcher:
         now = time.monotonic()
         if self.down_at is None and is_down(status):
             self.down_at = now
+            try:
+                self.error_at_down = _error_count(
+                    self.case, snapshot_now(self.case, self.dump)
+                )
+            except Exception:
+                pass
         if self.down_at is not None and self.up_at is None and is_fully_up(status):
             self.up_at = now
         self.last_status = status
@@ -168,6 +181,24 @@ def _error_count(case, snapshot: dict) -> int:
     return snapshot["proxy"]["counters"].get("responses_5xx", 0)
 
 
+def ensure_victim_running() -> None:
+    """HAProxy resolves backend DNS at startup; never restart it with the
+    victim stopped (a crashed earlier case must not poison the next one)."""
+    state = bm.run(
+        ["docker", "inspect", "--format", "{{.State.Status}}", VICTIM_CONTAINER]
+    ).stdout.strip()
+    if state == "running":
+        return
+    started = bm.run(["docker", "start", VICTIM_CONTAINER])
+    if started.returncode != 0:
+        raise RuntimeError(f"could not start {VICTIM_CONTAINER}: {started.stderr.strip()}")
+    if not bm.wait_for(
+        lambda: http_get(f"http://127.0.0.1:8002/health")[0] == 200,
+        timeout=60, step=0.5, what="victim healthy before LB restart",
+    ):
+        raise RuntimeError(f"{VICTIM_CONTAINER} never became healthy")
+
+
 def all_backends_healthy(case, dump: Path | None) -> bool:
     if case.mode == "custom":
         if dump is None or not dump.exists():
@@ -197,15 +228,18 @@ def run_failure_case(case, run_id: str, duration_s: int = 60) -> None:
     watcher = None
     wrk_proc = None
     try:
+        ensure_victim_running()
         if case.mode == "custom":
             proc, log, dump = bm.start_custom_proxy(case, run_id)
         else:
             bm.restart_haproxy()
         watcher = HealthWatcher(case, dump)
         watcher.start()
-        if not bm.wait_for(lambda: bm._tcp_open("127.0.0.1", case.port),
-                           timeout=30, step=0.5, what=f"LB port {case.port}"):
-            raise RuntimeError(f"load balancer never opened port {case.port}")
+        if not bm.wait_for(
+            lambda: http_get(f"http://127.0.0.1:{case.port}/work?delay_ms=5")[0] == 200,
+            timeout=60, step=0.5, what=f"LB HTTP readiness on {case.port}",
+        ):
+            raise RuntimeError(f"load balancer never served HTTP on port {case.port}")
         if not bm.wait_for(lambda: all_backends_healthy(case, dump),
                            timeout=60, step=0.5, what="all backends healthy at start"):
             raise RuntimeError("backends were not all healthy before the failure run")
@@ -231,7 +265,7 @@ def run_failure_case(case, run_id: str, duration_s: int = 60) -> None:
         wrk_proc.wait(timeout=duration_s + 120)
         wrk_log.close()
         wrk_text = wrk_path.read_text(encoding="utf-8")
-        if "requests in" not in wrk_text:
+        if not wrk_output_valid(wrk_text):
             raise RuntimeError(f"wrk produced no load: {wrk_text[:200]!r}")
         wrk_metrics = bm.parse_wrk_output(wrk_text)
         after = snapshot_now(case, dump)
@@ -241,9 +275,14 @@ def run_failure_case(case, run_id: str, duration_s: int = 60) -> None:
             round(watcher.down_at - t_kill, 3) if watcher.down_at is not None else None
         )
         failed = _error_count(case, after) - _error_count(case, before)
+        failed_detection = (
+            detection_failure_delta(_error_count(case, before), watcher.error_at_down)
+            if watcher.error_at_down is not None else None
+        )
         lines += [
             f"detection_s={detection}",
-            f"failed_requests={failed}",
+            f"failed_detection={failed_detection}",
+            f"failed_after_kill_30s={failed}",
             f"wrk_non_2xx={wrk_metrics['non_2xx']}",
             f"custom_transitions={custom_transitions(before, VICTIM)} -> "
             f"{custom_transitions(after, VICTIM)}" if case.mode == "custom"
@@ -288,7 +327,7 @@ def run_failure_case(case, run_id: str, duration_s: int = 60) -> None:
                     backend_id = "unparseable"
             hits[backend_id] = hits.get(backend_id, 0) + 1
         readmitted = recovery_ok(
-            hits, VICTIM, sticky=case.strategy in ("ip_hash", "source")
+            hits, VICTIM, sticky=case.strategy in ("ip_hash", "source"), healthy=up
         )
         lines += [f"all_backends_healthy_after_recovery={all_up_after}",
                   f"recovery_s={recovery_s}", f"post_recovery_hits={hits}",
@@ -297,7 +336,8 @@ def run_failure_case(case, run_id: str, duration_s: int = 60) -> None:
         bm.append_row(
             STRUCTURED_DIR / "failures.csv", FAILURES_HEADER,
             [run_id, case.mode, case.strategy, case.clients, VICTIM, kill_s,
-             detection, failed, wrk_metrics["non_2xx"], recovery_s, readmitted],
+             detection, failed_detection, failed, wrk_metrics["non_2xx"],
+             recovery_s, readmitted],
         )
         print(f"[{run_id}] detection={detection}s failed={failed} "
               f"recovery={recovery_s}s readmitted={readmitted}", flush=True)
@@ -324,7 +364,10 @@ def main() -> int:
     for case in cases:
         for index in range(1, args.runs + 1):
             run_id = bm.make_run_id(case, index, datetime.now())
-            run_failure_case(case, run_id, duration)
+            try:
+                run_failure_case(case, run_id, duration)
+            except Exception as exc:  # noqa: BLE001 - keep the remaining cases
+                print(f"[{run_id}] FAILED: {type(exc).__name__}: {exc}", flush=True)
     return 0
 
 

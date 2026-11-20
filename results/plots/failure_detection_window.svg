@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="420" viewBox="0 0 900 420">
+<text x="20" y="28" font-family="sans-serif" font-size="18">5xx between kill and DOWN</text>
+<line x1="70" y1="50" x2="70" y2="360" stroke="#333"/>
+<line x1="70" y1="360" x2="880" y2="360" stroke="#333"/>
+<text x="20" y="55" font-family="sans-serif" font-size="11">0</text>
+<text x="10" y="60" font-family="sans-serif" font-size="11">12061</text>
+<rect x="78.0" y="356.1" width="52.7" height="3.9" fill="#ff7f0e"><title>detection window custom-round_robin: 158</title></rect>
+<text x="135.8" y="378" text-anchor="middle" font-family="sans-serif" font-size="12">custom-round_robin</text>
+<rect x="209.7" y="352.8" width="52.7" height="7.2" fill="#ff7f0e"><title>detection window custom-least_active_requests: 290</title></rect>
+<text x="267.5" y="378" text-anchor="middle" font-family="sans-serif" font-size="12">custom-least_active_requests</text>
+<rect x="341.3" y="350.9" width="52.7" height="9.1" fill="#ff7f0e"><title>detection window custom-ip_hash: 366</title></rect>
+<text x="399.2" y="378" text-anchor="middle" font-family="sans-serif" font-size="12">custom-ip_hash</text>
+<rect x="473.0" y="318.3" width="52.7" height="41.7" fill="#ff7f0e"><title>detection window haproxy-roundrobin: 1678</title></rect>
+<text x="530.8" y="378" text-anchor="middle" font-family="sans-serif" font-size="12">haproxy-roundrobin</text>
+<rect x="604.7" y="99.1" width="52.7" height="260.9" fill="#ff7f0e"><title>detection window haproxy-leastconn: 10488</title></rect>
+<text x="662.5" y="378" text-anchor="middle" font-family="sans-serif" font-size="12">haproxy-leastconn</text>
+<rect x="736.3" y="249.8" width="52.7" height="110.2" fill="#ff7f0e"><title>detection window haproxy-source: 4429</title></rect>
+<text x="794.2" y="378" text-anchor="middle" font-family="sans-serif" font-size="12">haproxy-source</text>
+<circle cx="70" cy="398" r="6" fill="#ff7f0e"/>
+<text x="82" y="402" font-family="sans-serif" font-size="12">detection window</text>
+</svg>

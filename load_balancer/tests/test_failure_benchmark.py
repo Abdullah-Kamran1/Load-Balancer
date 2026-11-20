@@ -57,10 +57,42 @@ def test_recovery_requires_the_victim_to_receive_traffic():
                           "backend-2") is False
 
 
-def test_sticky_algorithms_judge_recovery_by_health_not_traffic():
-    # ip_hash/source pin one client IP to one backend; after re-admission a
-    # healthy victim may legitimately receive zero requests from that client.
-    assert fb.recovery_ok({"backend-1": 12}, "backend-2", sticky=True) is True
+def test_sticky_algorithms_judge_recovery_by_observed_health():
+    # ip_hash/source pin one client IP to one backend; traffic need not reach
+    # the recovered victim, but its health state must actually be UP.
+    assert fb.recovery_ok({"backend-1": 12}, "backend-2", sticky=True,
+                          healthy=True) is True
+    assert fb.recovery_ok({"backend-1": 12}, "backend-2", sticky=True,
+                          healthy=False) is False
+
+
+def test_detection_failure_delta_counts_only_the_window():
+    assert fb.detection_failure_delta(100, 137) == 37
+
+
+def test_wrk_output_valid_rejects_connection_refused():
+    assert fb.wrk_output_valid("100 requests in 8.01s, 1MB read\nRequests/sec: 12\n")
+    assert not fb.wrk_output_valid("unable to connect to host.docker.internal:8091 "
+                                   "Connection refused\n")
+
+
+def test_ensure_victim_restarts_a_stopped_container(monkeypatch):
+    calls = []
+
+    class Result:
+        returncode = 0
+        stdout = "exited"
+        stderr = ""
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return Result()
+
+    monkeypatch.setattr(fb.bm, "run", fake_run)
+    monkeypatch.setattr(fb.bm, "wait_for", lambda *a, **k: True)
+    monkeypatch.setattr(fb, "http_get", lambda url: (200, ""))
+    fb.ensure_victim_running()
+    assert any(c[:2] == ["docker", "start"] for c in calls)
 
 
 def test_error_count_accepts_json_string_status_keys():
