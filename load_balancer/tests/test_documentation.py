@@ -62,3 +62,27 @@ def test_runbook_documents_config_and_valid_commands():
     assert [name for name in sorted(scripts) if not (root / "scripts" / name).exists()] == []
     for heading in ("Prerequisites", "Running", "Configuration", "Testing", "Troubleshooting"):
         assert heading in runbook
+
+
+def test_readme_links_and_sections():
+    import re
+
+    root = repo_root()
+    readme = (root / "README.md").read_text(encoding="utf-8")
+    for heading in ("Introduction", "Installation", "Quickstart", "Documentation"):
+        assert re.search(rf"^#+\s+{heading}", readme, re.MULTILINE), heading
+    links = [
+        link for link in re.findall(r"\[[^\]]+\]\(([^)]+)\)", readme)
+        if not link.startswith(("http", "#", "mailto:"))
+    ]
+    assert links
+    broken = []
+    for link in links:
+        target = link.split("#", 1)[0]
+        if target and not (root / target).exists():
+            broken.append(link)
+    assert broken == []
+    for required in ("FILE_REFERENCE.md", "ARCHITECTURE_FLOW.md", "RUNBOOK.md",
+                     "benchmark_matrix.md", "final_report.md", "haproxy_setup.md",
+                     "metric_definitions.md"):
+        assert required in readme
