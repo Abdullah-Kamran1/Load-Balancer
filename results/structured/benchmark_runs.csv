@@ -1,1 +1,3 @@
 run_id,phase,mode,strategy,clients,threads,duration_s,wrk_path,snapshot_path,notes
+20261120-151537-custom-round_robin-50-r1,baseline,custom,round_robin,50,4,60.0,results/raw/wrk_20261120-151537-custom-round_robin-50-r1.txt,results/raw/snapshot_20261120-151537-custom-round_robin-50-r1.json,
+20261120-151651-custom-round_robin-50-r2,baseline,custom,round_robin,50,4,60.0,results/raw/wrk_20261120-151651-custom-round_robin-50-r2.txt,results/raw/snapshot_20261120-151651-custom-round_robin-50-r2.json,
