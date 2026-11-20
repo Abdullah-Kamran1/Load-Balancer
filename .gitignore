@@ -13,6 +13,8 @@ results/raw/*
 results/plots/*
 !results/raw/.gitkeep
 !results/plots/.gitkeep
+# Phase 8: final comparison charts are deliverables; scratch plot files stay ignored.
+!results/plots/*.svg
 
 # Project Plan
 load_balancer_project_plan.md

@@ -1,0 +1,191 @@
+run_id=20261120-162001-haproxy-source-500-r2
+captured_at=2026-11-20T16:21:18
+haproxy_image=haproxy:3.4-alpine@sha256:b9fe316f718d5015c5cfebd8ca019591f3e44656f61d93cb8b59a1028961e530
+haproxy_image_id=sha256:b9fe316f718d5015c5cfebd8ca019591f3e44656f61d93cb8b59a1028961e530
+haproxy_image_digest=haproxy@sha256:b9fe316f718d5015c5cfebd8ca019591f3e44656f61d93cb8b59a1028961e530
+config_path=haproxy/haproxy.cfg
+config_sha256=8c9e2b9d33bd980fa3ae107579d972e0f3c85bb52e0828519c897b1a7764adc9
+git_head=8ba6298be9cb5fed243bd7c16d3a0557fea10b90
+docker_version=client=29.9.3 server=29.9.3
+---- haproxy -vv ----
+HAProxy version 3.4.7-8872a26 2026/10/14 - https://haproxy.org/
+Status: long-term supported branch - will stop receiving fixes around Q2 2031.
+Known bugs: http://www.haproxy.org/bugs/bugs-3.4.7.html
+Running on: Linux 6.18.58.1-microsoft-standard-WSL2 #1 SMP PREEMPT_DYNAMIC Tue Oct 27 00:24:11 UTC 2026 x86_64
+Build options : 
+  TARGET  = linux-musl
+  CC      = cc
+  CFLAGS  = -O2 -g -fwrapv -fvect-cost-model=very-cheap
+  OPTIONS = USE_PTHREAD_EMULATION=1 USE_GETADDRINFO=1 USE_OPENSSL=1 USE_LUA=1 USE_QUIC=1 USE_PROMEX=1 USE_PCRE2=1 USE_PCRE2_JIT=1
+  DEBUG   = 
+
+Feature list : -51DEGREES +ACCEPT4 +ACME +BACKTRACE -CLOSEFROM +CPU_AFFINITY +CRYPT_H -DEVICEATLAS +DL -ECH -ENGINE +EPOLL -EVPORTS +GETADDRINFO +HAVE_TCP_MD5SIG -KQUEUE +KTLS -LIBATOMIC +LIBCRYPT +LINUX_CAP +LINUX_SPLICE +LINUX_TPROXY +LUA +MATH -MEMORY_PROFILING +NETFILTER +NS -OBSOLETE_LINKER +OPENSSL -OPENSSL_AWSLC -OPENSSL_WOLFSSL -OT -PCRE +PCRE2 +PCRE2_JIT -PCRE_JIT +POLL +PRCTL -PROCCTL +PROMEX +PTHREAD_EMULATION +QUIC -QUIC_OPENSSL_COMPAT +RT +SHM_OPEN +SLZ +SSL -STATIC_PCRE -STATIC_PCRE2 +TFO +THREAD +THREAD_DUMP +TPROXY +TRACE -WURFL -ZLIB
+Detected feature list : +HAVE_WORKING_TCP_MD5SIG
+
+Default settings :
+  bufsize = 16384, maxrewrite = 1024, maxpollevents = 200
+
+Built with multi-threading support (MAX_TGROUPS=32, MAX_THREADS=1024, default=20).
+Built with SSL library version : OpenSSL 3.5.9 29 Sep 2026
+Running on SSL library version : OpenSSL 3.5.9 29 Sep 2026
+SSL library supports TLS extensions : yes
+SSL library supports SNI : yes
+SSL library default verify directory : /etc/ssl/certs
+SSL library supports : TLSv1.0 TLSv1.1 TLSv1.2 TLSv1.3
+OpenSSL providers loaded : default
+QUIC: connection sock-per-conn mode support : yes
+QUIC: GSO emission support : yes
+Built with Lua version : Lua 5.4.8
+Built with the Prometheus exporter as a service
+Built with network namespace support.
+Built with libslz for stateless compression.
+Compression algorithms supported : identity("identity"), deflate("deflate"), raw-deflate("deflate"), gzip("gzip")
+Built with transparent proxy support using: IP_TRANSPARENT IPV6_TRANSPARENT IP_FREEBIND
+Built with PCRE2 version : 10.49 2026-09-28
+PCRE2 library supports JIT : yes
+Encrypted password support via crypt(3): yes
+Built with gcc compiler version 15.2.0
+
+Available polling systems :
+      epoll : pref=300,  test result OK
+       poll : pref=200,  test result OK
+     select : pref=150,  test result OK
+Total: 3 (3 usable), will use epoll.
+
+Available multiplexer protocols :
+(protocols marked as <default> cannot be specified using 'proto' keyword)
+       qmux : mode=HTTP  side=FE|BE  mux=QMUX  flags=HTX|NO_UPG
+       quic : mode=HTTP  side=FE|BE  mux=QUIC  flags=HTX|NO_UPG|FRAMED
+         h2 : mode=HTTP  side=FE|BE  mux=H2    flags=HTX|HOL_RISK|NO_UPG
+  <default> : mode=HTTP  side=FE|BE  mux=H1    flags=HTX
+         h1 : mode=HTTP  side=FE|BE  mux=H1    flags=HTX|NO_UPG
+       fcgi : mode=HTTP  side=BE     mux=FCGI  flags=HTX|HOL_RISK|NO_UPG
+  <default> : mode=SPOP  side=BE     mux=SPOP  flags=HOL_RISK|NO_UPG
+       spop : mode=SPOP  side=BE     mux=SPOP  flags=HOL_RISK|NO_UPG
+  <default> : mode=TCP   side=FE|BE  mux=PASS  flags=
+       none : mode=TCP   side=FE|BE  mux=PASS  flags=NO_UPG
+
+Available services : prometheus-exporter
+Available filters :
+	[BWLIM] bwlim-in
+	[BWLIM] bwlim-out
+	[CACHE] cache
+	[COMP] comp-req
+	[COMP] comp-res
+	[COMP] compression
+	[FCGI] fcgi-app
+	[SPOE] spoe
+	[TRACE] trace
+---- configuration (verbatim copy) ----
+# Phase 7: HAProxy 3.4 reference implementation.
+#
+# One container, three HTTP frontends over the SAME four-backend farm the
+# custom proxy uses (backend-1..4:8000 on lb-net):
+#
+#   :8091  frontend fe_roundrobin    -> backend be_roundrobin    (balance roundrobin)
+#   :8092  frontend fe_leastconn     -> backend be_leastconn     (balance leastconn)
+#   :8093  frontend fe_source        -> backend be_source        (balance source)
+#   :8404  stats page + ";csv" export (diagnostics)
+#
+# Only the frontend under test receives load, so one load balancer handles
+# a run at a time (plan fair-comparison rule).
+#
+# Settings mirror the custom proxy where HAProxy has an equivalent:
+#   custom proxy                          HAProxy
+#   GET /health, success = HTTP 200       option httpchk GET /health HTTP/1.1
+#                                         http-check expect status 200
+#   LB_HEALTH_INTERVAL=1.0                default-server inter 1s
+#   LB_HEALTH_TIMEOUT=1.0                 timeout check 1s
+#   LB_HEALTH_FAILURES=3  (-> DOWN)       fall 3
+#   LB_HEALTH_RECOVERIES=2 (-> UP)        rise 2
+#   connect_timeout 5.0                   timeout connect 5s
+#   request_timeout 30.0 (read + idle)    timeout client/server/http-request 30s
+#   one upstream connection per request   option http-server-close
+#   no upstream retry                     retries 0
+#
+# Deliberate, recorded differences (docs/haproxy_setup.md):
+#   - HAProxy answers 503 when no server can be reached; the custom proxy
+#     answers 502.
+#   - HAProxy `leastconn` counts server-side CONNECTIONS (plus queued), not
+#     in-flight requests like the custom least_active_requests strategy.
+#   - HAProxy `source` hashes the client IP with its map-based hash; the
+#     custom ip_hash uses SHA-256. Both are sticky but not identical.
+#   - HAProxy is multi-threaded (default nbthread = detected CPUs); the
+#     custom proxy is a single asyncio thread. Natural configurations are
+#     kept for both; the difference is reported with benchmark results.
+
+global
+    log stdout format raw local0 notice
+    maxconn 4096
+    # Default nbthread (one per detected CPU) is intentional: each
+    # implementation runs in its natural configuration.
+
+defaults
+    mode http
+    log global
+    option httplog
+    option dontlognull
+    # Keep client keep-alive (wrk reuses connections) while closing the
+    # server-side connection after each response, exactly like the custom
+    # proxy's one-upstream-connection-per-request model.
+    option http-server-close
+    # Suppress per-request access logs (benchmark volume); state changes
+    # and errors are still logged.
+    option dontlog-normal
+    retries 0
+    timeout connect 5s
+    timeout client 30s
+    timeout server 30s
+    timeout http-request 30s
+    timeout http-keep-alive 30s
+    timeout check 1s
+    default-server check inter 1s fall 3 rise 2
+
+frontend fe_roundrobin
+    bind :8091
+    default_backend be_roundrobin
+
+frontend fe_leastconn
+    bind :8092
+    default_backend be_leastconn
+
+frontend fe_source
+    bind :8093
+    default_backend be_source
+
+backend be_roundrobin
+    balance roundrobin
+    option httpchk GET /health HTTP/1.1
+    http-check expect status 200
+    server backend-1 backend-1:8000
+    server backend-2 backend-2:8000
+    server backend-3 backend-3:8000
+    server backend-4 backend-4:8000
+
+backend be_leastconn
+    balance leastconn
+    option httpchk GET /health HTTP/1.1
+    http-check expect status 200
+    server backend-1 backend-1:8000
+    server backend-2 backend-2:8000
+    server backend-3 backend-3:8000
+    server backend-4 backend-4:8000
+
+backend be_source
+    balance source
+    option httpchk GET /health HTTP/1.1
+    http-check expect status 200
+    server backend-1 backend-1:8000
+    server backend-2 backend-2:8000
+    server backend-3 backend-3:8000
+    server backend-4 backend-4:8000
+
+# Diagnostics: HTML page at /stats, machine-readable CSV at /stats;csv
+# (server rows expose status UP/DOWN, stot, hrsp_2xx..5xx).
+listen stats
+    bind :8404
+    mode http
+    stats enable
+    stats uri /stats
+    stats refresh 2s
+    stats show-legends

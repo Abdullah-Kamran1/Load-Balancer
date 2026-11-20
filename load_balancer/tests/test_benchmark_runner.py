@@ -173,6 +173,16 @@ def test_zero_warmup_skips_the_warmup_wrk_run(monkeypatch, tmp_path):
     assert calls == [(run_id, 8, False)]
 
 
+def test_port_available_detects_a_bound_listener():
+    import socket
+
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+        assert bm.port_available(port) is False
+    assert bm.port_available(port) is True
+
+
 def test_host_sampler_reads_process_usage_from_dump(tmp_path):
     dump = tmp_path / "dump.json"
     dump.write_text(

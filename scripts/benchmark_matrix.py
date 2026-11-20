@@ -220,6 +220,11 @@ def ensure_farm() -> None:
 
 
 def start_custom_proxy(case: Case, run_id: str) -> tuple[subprocess.Popen, object, Path]:
+    # Windows keeps wrk's connections in TIME_WAIT on port 8080; a restart
+    # inside that window cannot bind. Wait for a successful fresh bind.
+    if not wait_for(lambda: port_available(CUSTOM_PORT), timeout=90, step=1,
+                    what="custom proxy port free"):
+        raise RuntimeError(f"port {CUSTOM_PORT} never became available for the proxy")
     dump = RAW_DIR / f"custom_{run_id}_snapshot.json"
     dump.parent.mkdir(parents=True, exist_ok=True)
     dump.unlink(missing_ok=True)
@@ -240,10 +245,22 @@ def start_custom_proxy(case: Case, run_id: str) -> tuple[subprocess.Popen, objec
         cwd=REPO_ROOT, env=env, stdout=log, stderr=subprocess.STDOUT,
     )
     if not wait_for(lambda: _tcp_open("127.0.0.1", CUSTOM_PORT),
-                    timeout=15, step=0.1, what="custom proxy listener"):
+                    timeout=30, step=0.1, what="custom proxy listener"):
         stop_custom_proxy(proc, log)
         raise RuntimeError("custom proxy never opened its listener")
     return proc, log, dump
+
+
+def port_available(port: int, host: str = "127.0.0.1") -> bool:
+    """True when a fresh bind succeeds (no LISTEN/TIME_WAIT squatting)."""
+    import socket
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        try:
+            probe.bind((host, port))
+            return True
+        except OSError:
+            return False
 
 
 def _tcp_open(host: str, port: int) -> bool:
