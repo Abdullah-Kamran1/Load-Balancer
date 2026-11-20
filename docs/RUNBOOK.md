@@ -61,6 +61,9 @@ Ports: custom `:8080`; HAProxy `:8091` round robin, `:8092` least connections,
 
 ### A single wrk run
 
+The example below assumes the **HAProxy** reference environment is running;
+change the port to `:8080` for the custom proxy started in the previous section.
+
 ```powershell
 $runId = Get-Date -Format "yyyyMMdd-HHMMSS"
 docker run --rm lb/wrk -t2 -c10 -d8s --latency `
@@ -95,7 +98,10 @@ Combine a manual wrk output with a saved snapshot:
 
 Useful matrix flags: `--start N --limit M` to select cases (order from
 `--dry-run`), `--smoke` for 8 s runs without warm-up, `--duration` and
-`--warmup` to override timings.
+`--warmup` to override timings. `haproxy_acceptance.py --no-start` skips
+starting the stack. `build_report_data.py` and `build_report_plots.py` accept
+`--out` to change their output location; `parse_wrk.py --csv` overrides the
+destination CSV.
 
 ## Configuration
 

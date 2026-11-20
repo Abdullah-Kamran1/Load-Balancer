@@ -18,7 +18,7 @@ for commands and configuration see [RUNBOOK.md](RUNBOOK.md).
 
 ### `backend/app/main.py`
 - **Purpose:** FastAPI test backend with fixed URLs (`/`, `/health`, `/work`, `/stats`).
-- **API:** `root()`, `health()` (200), `work(delay_ms=None)` (clamps delay to `[0, max_delay_ms]`, uses `asyncio.Semaphore(max_concurrency)`, returns JSON with `backend_id`/`request_id`/`delay_ms`/`active_requests`/`duration_ms` or 503 + `Retry-After: 1`), `stats()` (counters + configured capacity). Module globals `settings`, `metrics`, `_work_slots`, `app`.
+- **API:** `root()`, `health()` (200), `work(delay_ms=None)` (clamps delay to `[0, max_delay_ms]`, uses `asyncio.Semaphore(max_concurrency)`, returns `{"backend_id", "requested_delay_ms", "actual_ms"}` or 503 + `Retry-After: 1`), `stats()` (counters + configured capacity). Module globals `settings`, `metrics`, `_work_slots`, `app`.
 - **Called by:** `uvicorn app.main:app` in `backend/Dockerfile`; probed by the health monitor, wrk and acceptance scripts.
 - **Calls:** `.config.load_settings`, `.metrics.Metrics`, FastAPI, asyncio.
 

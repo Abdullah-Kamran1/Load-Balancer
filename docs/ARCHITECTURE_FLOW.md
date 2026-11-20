@@ -71,7 +71,13 @@ Important details:
   503 no healthy backend. The custom proxy never claims HAProxy's 503/502
   mapping is identical.
 
-## 3. Backend health state machine
+## 3. Backend health states (custom boolean + HAProxy transitional statuses)
+
+The custom proxy stores one boolean `Backend.healthy` plus timestamped
+transitions; HAProxy prints transitional `UP n/m` / `DOWN n/m` while its
+fall/rise counters drain. The diagram below uses HAProxy's labels for the
+transitional steps — only plain `DOWN` means out of rotation and only plain
+`UP` means fully re-admitted in both implementations.
 
 ```mermaid
 stateDiagram-v2

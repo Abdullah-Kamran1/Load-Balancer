@@ -25,7 +25,30 @@ def test_created_files_have_reference_sections():
     reference = (root / "docs" / "FILE_REFERENCE.md").read_text(encoding="utf-8")
     created = created_source_files(root)
     assert created, "no files discovered"
-    missing = [path for path in created if f"`{path}`" not in reference]
+    sections = {}
+    for part in reference.split("\n### `")[1:]:
+        name = part.split("`", 1)[0]
+        sections[name] = part
+    missing_sections = [path for path in created if path not in sections]
+    assert missing_sections == []
+    no_purpose = [
+        path for path in created if "**Purpose:**" not in sections[path]
+    ]
+    assert no_purpose == []
+    assert [path for path in created if f"`{path}`" not in reference] == []
+
+
+def test_runbook_documents_every_script_flag():
+    import re
+
+    root = repo_root()
+    runbook = (root / "docs" / "RUNBOOK.md").read_text(encoding="utf-8")
+    missing = []
+    for script in sorted((root / "scripts").glob("*.py")):
+        text = script.read_text(encoding="utf-8")
+        for flag in set(re.findall(r'add_argument\(\s*["\'](--[a-z-]+)', text)):
+            if flag not in runbook:
+                missing.append(f"{script.name}:{flag}")
     assert missing == []
 
 
@@ -34,8 +57,8 @@ def test_flow_overview_covers_all_states_and_pipelines():
     flow = (root / "docs" / "ARCHITECTURE_FLOW.md").read_text(encoding="utf-8")
     required = [
         "START", "READ_REQUEST", "SELECT_BACKEND", "FORWARD", "DRAIN_RESPONSE",
-        "UNHEALTHY", "RECOVERING", "UP", "DOWN", "UP n/m", "DOWN n/m",
-        "metrics dump", "combined.csv", "baseline_medians.csv",
+        "UNHEALTHY", "RECOVERING", "UP 1/3", "DOWN 1/2", "UP n/m", "DOWN n/m",
+        "only plain `DOWN`", "metrics dump", "combined.csv", "baseline_medians.csv",
         "failure_timeline.svg", "final_report.md",
     ]
     assert [token for token in required if token not in flow] == []
