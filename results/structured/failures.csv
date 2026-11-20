@@ -1,0 +1,7 @@
+run_id,mode,strategy,clients,victim,kill_at_s,detection_s,failed_requests,wrk_non_2xx,recovery_s,readmitted
+20261120-163606-custom-round_robin-50-r1,custom,round_robin,50,backend-2,30,6.744,26383,26823,,True
+20261120-163810-custom-least_active_requests-50-r1,custom,least_active_requests,50,backend-2,30,6.795,27278,28355,56.245,True
+20261120-164009-custom-ip_hash-50-r1,custom,ip_hash,50,backend-2,30,5.88,11301,13629,3.389,True
+20261120-164116-haproxy-roundrobin-50-r1,haproxy,roundrobin,50,backend-2,30,4.249,52848,115979,2.544,True
+20261120-164223-haproxy-leastconn-50-r1,haproxy,leastconn,50,backend-2,30,4.6,67092,136795,2.457,True
+20261120-164329-haproxy-source-50-r1,haproxy,source,50,backend-2,30,4.458,44382,86406,2.339,True

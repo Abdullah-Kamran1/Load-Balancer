@@ -17,6 +17,7 @@ import html
 import statistics
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -208,8 +209,9 @@ def line_chart_svg(title: str, categories: list[str], series: list[tuple]) -> st
             y = bottom - (value / max_v) * (bottom - top)
             points.append(f"{x:.1f},{y:.1f}")
         color = COLORS[si % len(COLORS)]
+        points_text = " ".join(points)
         out.append(
-            f'<polyline points="{" ".join(points)}" fill="none" stroke="{color}" '
+            f'<polyline points="{points_text}" fill="none" stroke="{color}" '
             f'stroke-width="2"/>'
         )
         out.append(f'<circle cx="{left + si*160}" cy="{height-22}" r="6" fill="{color}"/>')
@@ -242,6 +244,7 @@ def write_environment(path: Path) -> None:
         )
         return result.stdout.strip()
 
+    docker_version = ps("docker version --format 'client={{.Client.Version}}'")
     haproxy_env = sorted(STRUCTURED.glob("haproxy_environment_*.txt"))
     haproxy_version = "not captured"
     if haproxy_env:
@@ -251,14 +254,14 @@ def write_environment(path: Path) -> None:
                 break
     cfg = REPO_ROOT / "haproxy" / "haproxy.cfg"
     lines = [
-        f"captured_at={__import__('datetime').datetime.now().isoformat(timespec='seconds')}",
+        f"captured_at={datetime.now().isoformat(timespec='seconds')}",
         f"python_version={sys.version.split()[0]}",
-        f"docker_version={ps('docker version --format client={{.Client.Version}}')}",
+        f"docker_version={docker_version}",
         f"cpu={ps('(Get-CimInstance Win32_Processor | Select-Object -First 1).Name')}",
         f"logical_cpus={ps('(Get-CimInstance Win32_ComputerSystem).NumberOfLogicalProcessors')}",
         f"ram_gib={ps('[math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory/1GB,2)')}",
         f"haproxy_image={haproxy_version}",
-        f"haproxy_config_sha256={hashlib.sha256(cfg.read_bytes()).hexdigest()}",
+        f"haproxy_config_sha256={hashlib.sha256(cfg.read_text(encoding='utf-8').encode('utf-8')).hexdigest()}",
         "workload=GET /work?delay_ms=25",
         "farm=backend-1 25ms/16, backend-2 100ms/8, backend-3 300ms/4, backend-4 50ms/6",
         "custom_proxy=host process on 127.0.0.1:8080, asyncio single thread",
@@ -298,7 +301,7 @@ def main() -> int:
             row["requests"], row["errors"], lb_cpu, lb_mem, wrk_cpu,
             ";".join(f"{b}:{row['shares'].get(b, 0.0)}" for b in BACKENDS),
         ])
-    path = STRUCTED = STRUCTURED / "baseline_medians.csv"
+    path = STRUCTURED / "baseline_medians.csv"
     with path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow(MEDIANS_HEADER)

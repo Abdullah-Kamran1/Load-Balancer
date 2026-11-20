@@ -31,7 +31,7 @@ from scripts.haproxy_acceptance import get_stats, server_status
 
 VICTIM = "backend-2"
 VICTIM_CONTAINER = "lb-backend-2"
-FAILURE_CLIENTS = 200
+FAILURE_CLIENTS = 50
 RAW_DIR = REPO_ROOT / "results" / "raw"
 STRUCTURED_DIR = REPO_ROOT / "results" / "structured"
 FAILURES_HEADER = [
@@ -100,6 +100,7 @@ class HealthWatcher:
         self.down_at: float | None = None
         self.up_at: float | None = None
         self.last_status = "UP"
+        self.armed = False
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -115,17 +116,25 @@ class HealthWatcher:
         stats = get_stats()
         return server_status(stats, self.case.pxname, VICTIM)
 
+    def record(self, status: str) -> None:
+        """Only statuses observed after arm() count toward detection."""
+        if not self.armed or status == self.last_status:
+            return
+        now = time.monotonic()
+        if self.down_at is None and is_down(status):
+            self.down_at = now
+        if self.down_at is not None and self.up_at is None and is_fully_up(status):
+            self.up_at = now
+        self.last_status = status
+
+    def arm(self, status: str) -> None:
+        self.last_status = status
+        self.armed = True
+
     def _loop(self) -> None:
         while not self._stop.is_set():
             try:
-                status = self._status()
-                if status != self.last_status:
-                    now = time.monotonic()
-                    if self.down_at is None and is_down(status):
-                        self.down_at = now
-                    if self.down_at is not None and self.up_at is None and is_fully_up(status):
-                        self.up_at = now
-                    self.last_status = status
+                self.record(self._status())
             except Exception:  # transient stats/dump read while polling
                 pass
             self._stop.wait(0.1)
@@ -151,8 +160,26 @@ def snapshot_now(case, dump: Path | None) -> dict:
 def _error_count(case, snapshot: dict) -> int:
     if case.mode == "custom":
         counts = snapshot["proxy"]["counters"].get("status_counts", {})
-        return sum(counts.get(s, 0) for s in (500, 502, 503, 504))
+        # JSON object keys are strings ("502"), not ints.
+        return sum(
+            value for key, value in counts.items()
+            if str(key).isdigit() and int(key) in (500, 502, 503, 504)
+        )
     return snapshot["proxy"]["counters"].get("responses_5xx", 0)
+
+
+def all_backends_healthy(case, dump: Path | None) -> bool:
+    if case.mode == "custom":
+        if dump is None or not dump.exists():
+            return False
+        snap = json.loads(dump.read_text(encoding="utf-8"))
+        backends = snap.get("backends", [])
+        return len(backends) == 4 and all(b.get("healthy") for b in backends)
+    stats = get_stats()
+    return all(
+        server_status(stats, case.pxname, f"backend-{i}") == "UP"
+        for i in range(1, 5)
+    )
 
 
 def _write_timeline(run_id: str, lines: list[str]) -> Path:
@@ -176,6 +203,13 @@ def run_failure_case(case, run_id: str, duration_s: int = 60) -> None:
             bm.restart_haproxy()
         watcher = HealthWatcher(case, dump)
         watcher.start()
+        if not bm.wait_for(lambda: bm._tcp_open("127.0.0.1", case.port),
+                           timeout=30, step=0.5, what=f"LB port {case.port}"):
+            raise RuntimeError(f"load balancer never opened port {case.port}")
+        if not bm.wait_for(lambda: all_backends_healthy(case, dump),
+                           timeout=60, step=0.5, what="all backends healthy at start"):
+            raise RuntimeError("backends were not all healthy before the failure run")
+        lines.append("precondition=all backends healthy, LB port open")
 
         cmd = bm.wrk_command(case, run_id, duration_s)
         wrk_path = RAW_DIR / f"wrk_failure_{run_id}.txt"
@@ -188,6 +222,7 @@ def run_failure_case(case, run_id: str, duration_s: int = 60) -> None:
 
         time.sleep(kill_s)
         before = snapshot_now(case, dump)
+        watcher.arm(watcher._status())  # ignore any pre-kill health flips
         t_kill = time.monotonic()
         killed = bm.run(["docker", "kill", VICTIM_CONTAINER])
         lines.append(f"t+{kill_s:.2f}s: docker kill {VICTIM_CONTAINER}")
@@ -196,6 +231,8 @@ def run_failure_case(case, run_id: str, duration_s: int = 60) -> None:
         wrk_proc.wait(timeout=duration_s + 120)
         wrk_log.close()
         wrk_text = wrk_path.read_text(encoding="utf-8")
+        if "requests in" not in wrk_text:
+            raise RuntimeError(f"wrk produced no load: {wrk_text[:200]!r}")
         wrk_metrics = bm.parse_wrk_output(wrk_text)
         after = snapshot_now(case, dump)
         watcher.finish()
@@ -228,23 +265,18 @@ def run_failure_case(case, run_id: str, duration_s: int = 60) -> None:
             f"direct_health_after_start={round(time.monotonic() - t_restart, 3)}s "
             f"ok={direct_up}"
         )
-        up = False
-        for _ in range(100):
-            if case.mode == "custom":
-                snap = snapshot_now(case, dump)
-                backend = next(
-                    (b for b in snap.get("backends", [])
-                     if b["backend_id"] == VICTIM), {}
-                )
-                up = bool(backend.get("healthy"))
-            else:
-                up = is_fully_up(server_status(get_stats(), case.pxname, VICTIM))
-            if up:
-                break
-            time.sleep(0.2)
+        all_up_after = bm.wait_for(lambda: all_backends_healthy(case, dump),
+                                   timeout=60, step=0.5, what="all backends healthy in recovery")
+        up = all_up_after and bm.wait_for(
+            (lambda: bool(next((b for b in snapshot_now(case, dump).get("backends", [])
+                                if b["backend_id"] == VICTIM), {}).get("healthy")))
+            if case.mode == "custom"
+            else (lambda: is_fully_up(server_status(get_stats(), case.pxname, VICTIM))),
+            timeout=20, step=0.2, what="victim UP in recovery"
+        )
         recovery_s = round(time.monotonic() - t_restart, 3) if up else None
         hits: dict[str, int] = {}
-        for _ in range(12):
+        for _ in range(40):
             status, body = http_get(
                 f"http://127.0.0.1:{case.port}/work?delay_ms=5"
             )
@@ -258,7 +290,8 @@ def run_failure_case(case, run_id: str, duration_s: int = 60) -> None:
         readmitted = recovery_ok(
             hits, VICTIM, sticky=case.strategy in ("ip_hash", "source")
         )
-        lines += [f"recovery_s={recovery_s}", f"post_recovery_hits={hits}",
+        lines += [f"all_backends_healthy_after_recovery={all_up_after}",
+                  f"recovery_s={recovery_s}", f"post_recovery_hits={hits}",
                   f"readmitted={readmitted}"]
 
         bm.append_row(

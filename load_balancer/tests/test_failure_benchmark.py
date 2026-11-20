@@ -1,5 +1,6 @@
 """Phase 8: pure logic for the timed backend-failure benchmark."""
 
+from scripts import benchmark_matrix as bm
 from scripts import failure_benchmark as fb
 
 
@@ -11,7 +12,7 @@ def test_failure_cases_cover_all_six_mode_algorithm_pairs():
         ("custom", "ip_hash"), ("haproxy", "roundrobin"),
         ("haproxy", "leastconn"), ("haproxy", "source"),
     }
-    assert {c.clients for c in cases} == {200}
+    assert {c.clients for c in cases} == {50}
     assert fb.VICTIM == "backend-2"
 
 
@@ -60,3 +61,21 @@ def test_sticky_algorithms_judge_recovery_by_health_not_traffic():
     # ip_hash/source pin one client IP to one backend; after re-admission a
     # healthy victim may legitimately receive zero requests from that client.
     assert fb.recovery_ok({"backend-1": 12}, "backend-2", sticky=True) is True
+
+
+def test_error_count_accepts_json_string_status_keys():
+    # JSON object keys are strings, so counts.get(502) silently returned 0.
+    snap = {"proxy": {"counters": {"status_counts": {"200": 10, "502": 3, "503": 2}}}}
+    assert fb._error_count(bm.build_cases()[0], snap) == 5
+
+
+def test_watcher_ignores_transitions_before_the_kill():
+    case = bm.build_cases()[0]
+    watcher = fb.HealthWatcher(case, None)
+    watcher.record("DOWN")  # stale state from before the run
+    assert watcher.down_at is None
+    watcher.arm("UP")
+    watcher.record("UP 2/3")
+    assert watcher.down_at is None
+    watcher.record("DOWN")
+    assert watcher.down_at is not None

@@ -1,0 +1,13 @@
+captured_at=2026-11-20T16:45:57
+python_version=3.15.2
+docker_version=client=29.9.3
+cpu=12th Gen Intel(R) Core(TM) i7-12700H
+logical_cpus=20
+ram_gib=15.71
+haproxy_image=haproxy:3.4-alpine@sha256:b9fe316f718d5015c5cfebd8ca019591f3e44656f61d93cb8b59a1028961e530
+haproxy_config_sha256=8c9e2b9d33bd980fa3ae107579d972e0f3c85bb52e0828519c897b1a7764adc9
+workload=GET /work?delay_ms=25
+farm=backend-1 25ms/16, backend-2 100ms/8, backend-3 300ms/4, backend-4 50ms/6
+custom_proxy=host process on 127.0.0.1:8080, asyncio single thread
+haproxy=container lb-haproxy, 3 frontends :8091/:8092/:8093, stats :8404
+cpu_note=custom proxy CPU is self-reported process_time delta; containers use docker stats; neither is normalised across hosts
