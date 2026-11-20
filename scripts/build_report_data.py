@@ -86,7 +86,8 @@ def _row(metric: str, mode: str, strategy: str, clients, value, evidence: str) -
 
 
 def build_rows(medians: Path, failures: Path, keepalive: Path, close: Path,
-               snapshot: Path, timelines: dict[str, Path]) -> list[dict]:
+               snapshot: Path, timelines: dict[str, Path],
+               haproxy_snapshot: Path | None = None) -> list[dict]:
     rows: list[dict] = []
     for run in _read_csv(medians):
         shares = parse_shares(run["backend_shares"])
@@ -134,6 +135,14 @@ def build_rows(medians: Path, failures: Path, keepalive: Path, close: Path,
     rows.append(_row("snapshot_requests_per_connection", "custom", "persistent", "",
                      round(counters["requests_total"] / counters["connections_total"], 2),
                      "results/raw/custom_20261120-151537-custom-round_robin-50-r1_snapshot.json"))
+    if haproxy_snapshot is not None:
+        ha = json.loads(haproxy_snapshot.read_text(encoding="utf-8"))
+        ha_counters = ha["proxy"]["counters"]
+        rows.append(_row(
+            "haproxy_snapshot_requests_per_connection", "haproxy", "persistent", "",
+            round(ha_counters["requests_total"] / ha_counters["connections_total"], 2),
+            "results/raw/haproxy_snapshot_20261118-214416.json",
+        ))
 
     for run_id, path in timelines.items():
         events = parse_timeline(path)
@@ -171,6 +180,7 @@ def main() -> int:
         RAW / "phase3_wrk_close.txt",
         RAW / "custom_20261120-151537-custom-round_robin-50-r1_snapshot.json",
         timelines,
+        haproxy_snapshot=RAW / "haproxy_snapshot_20261118-214416.json",
     )
     write_csv(args.out, rows)
     print(f"wrote {len(rows)} report figures to {args.out.relative_to(REPO_ROOT)}")

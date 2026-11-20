@@ -125,8 +125,8 @@ wide margin. Evidence: `results/structured/failures.csv`,
 
 From the kill to the first DOWN the custom proxy recorded **158–366** 5xx
 responses, HAProxy **1,678–10,488**. The absolute counts are not directly
-comparable: HAProxy offered roughly 3,600 rps versus the custom proxy's few
-hundred, so it had far more in-flight requests aimed at the dying server.
+comparable: HAProxy offered roughly 1,800–3,700 rps versus the custom
+proxy's few hundred to ~940 rps, so it had far more in-flight requests aimed at the dying server.
 Over the full 30 s after the kill the counts were 11,410–23,460 (custom) and
 38,550–57,196 (HAProxy), dominated by capacity 503s; the detection-window
 figure is the closer analogue of "failures caused by the failure".
@@ -154,21 +154,21 @@ connection per request**; upstream pooling is an optional extension, and the
 A persistent connection can carry hundreds of sequential requests, and can
 also be idle between them. In one wrk run the custom snapshot recorded
 `connections_total = 50` against `requests_total = 59,109` (~1,182 requests
-per connection); HAProxy's frontend row similarly showed 11 client
-connections for 11,145 requests. HAProxy `leastconn` counts *connections*
+per connection); a preserved HAProxy demo snapshot showed 11 client
+connections for 11,005 requests (~1,000 per connection). HAProxy `leastconn` counts *connections*
 (including queued work), while the custom `least_active_requests` counts
 *in-flight requests* on the backend objects; an idle keep-alive connection
 inflates the former without representing work. Under `option http-server-close`
 a server connection ≈ one request in this harness, but the definitions are
 not identical. Evidence: `report_data.csv`
-(`snapshot_requests_per_connection`), `results/structured/combined.csv`,
+(`snapshot_requests_per_connection`, `haproxy_snapshot_requests_per_connection`), `results/structured/combined.csv`,
 `docs/haproxy_setup.md` (counters and semantics), `docs/metric_definitions.md`.
 
 ### 10. Where does the custom proxy fall behind HAProxy, and why?
 
 At 50 clients the custom proxy managed 360–943 rps with 558–647 ms p99,
-while HAProxy managed 1,785–3,698 rps with 36–52 ms p99; custom CPU was
-16–87% of one core, HAProxy 56–204% across cores. Causes, in order of
+while HAProxy managed 1,785–3,698 rps with 35–52 ms p99. Across all 18 cases
+custom CPU was 16–87% of one core and HAProxy 56–204% across cores. Causes, in order of
 importance: (1) HAProxy is mature C code with an event-driven multi-threaded
 core; the custom proxy is single-threaded asyncio + pure-Python h11 framing.
 (2) The custom proxy opens one upstream connection per request; upstream

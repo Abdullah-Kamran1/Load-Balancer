@@ -4,27 +4,18 @@
 <line x1="70" y1="360" x2="880" y2="360" stroke="#333"/>
 <text x="20" y="55" font-family="sans-serif" font-size="11">0</text>
 <text x="10" y="60" font-family="sans-serif" font-size="11">218</text>
-<rect x="78.0" y="276.5" width="35.1" height="83.5" fill="#1f77b4"><title>custom (self-reported) ip_hash: 60.7</title></rect>
-<rect x="121.9" y="360.0" width="35.1" height="0.0" fill="#d62728"><title>haproxy (docker stats) ip_hash: 0</title></rect>
-<text x="135.8" y="378" text-anchor="middle" font-family="sans-serif" font-size="12">ip_hash</text>
-<rect x="209.7" y="275.4" width="35.1" height="84.6" fill="#1f77b4"><title>custom (self-reported) least_active_requests: 61.45</title></rect>
-<rect x="253.6" y="360.0" width="35.1" height="0.0" fill="#d62728"><title>haproxy (docker stats) least_active_requests: 0</title></rect>
-<text x="267.5" y="378" text-anchor="middle" font-family="sans-serif" font-size="12">least_active_requests</text>
-<rect x="341.3" y="360.0" width="35.1" height="0.0" fill="#1f77b4"><title>custom (self-reported) leastconn: 0</title></rect>
-<rect x="385.2" y="99.1" width="35.1" height="260.9" fill="#d62728"><title>haproxy (docker stats) leastconn: 189.58</title></rect>
-<text x="399.2" y="378" text-anchor="middle" font-family="sans-serif" font-size="12">leastconn</text>
-<rect x="473.0" y="284.6" width="35.1" height="75.4" fill="#1f77b4"><title>custom (self-reported) round_robin: 54.8</title></rect>
-<rect x="516.9" y="360.0" width="35.1" height="0.0" fill="#d62728"><title>haproxy (docker stats) round_robin: 0</title></rect>
-<text x="530.8" y="378" text-anchor="middle" font-family="sans-serif" font-size="12">round_robin</text>
-<rect x="604.7" y="360.0" width="35.1" height="0.0" fill="#1f77b4"><title>custom (self-reported) roundrobin: 0</title></rect>
-<rect x="648.6" y="113.7" width="35.1" height="246.3" fill="#d62728"><title>haproxy (docker stats) roundrobin: 178.99</title></rect>
-<text x="662.5" y="378" text-anchor="middle" font-family="sans-serif" font-size="12">roundrobin</text>
-<rect x="736.3" y="360.0" width="35.1" height="0.0" fill="#1f77b4"><title>custom (self-reported) source: 0</title></rect>
-<rect x="780.2" y="281.1" width="35.1" height="78.9" fill="#d62728"><title>haproxy (docker stats) source: 57.37</title></rect>
-<text x="794.2" y="378" text-anchor="middle" font-family="sans-serif" font-size="12">source</text>
+<rect x="78.0" y="276.5" width="70.2" height="83.5" fill="#1f77b4"><title>custom (self-reported) ip hash / source: 60.7</title></rect>
+<rect x="165.8" y="281.1" width="70.2" height="78.9" fill="#d62728"><title>haproxy (docker stats) ip hash / source: 57.37</title></rect>
+<text x="201.7" y="378" text-anchor="middle" font-family="sans-serif" font-size="12">ip hash / source</text>
+<rect x="341.3" y="275.4" width="70.2" height="84.6" fill="#1f77b4"><title>custom (self-reported) least active / leastconn: 61.45</title></rect>
+<rect x="429.1" y="99.1" width="70.2" height="260.9" fill="#d62728"><title>haproxy (docker stats) least active / leastconn: 189.58</title></rect>
+<text x="465.0" y="378" text-anchor="middle" font-family="sans-serif" font-size="12">least active / leastconn</text>
+<rect x="604.7" y="284.6" width="70.2" height="75.4" fill="#1f77b4"><title>custom (self-reported) round robin: 54.8</title></rect>
+<rect x="692.4" y="113.7" width="70.2" height="246.3" fill="#d62728"><title>haproxy (docker stats) round robin: 178.99</title></rect>
+<text x="728.3" y="378" text-anchor="middle" font-family="sans-serif" font-size="12">round robin</text>
 <circle cx="70" cy="398" r="6" fill="#1f77b4"/>
 <text x="82" y="402" font-family="sans-serif" font-size="12">custom (self-reported)</text>
 <circle cx="230" cy="398" r="6" fill="#d62728"/>
 <text x="242" y="402" font-family="sans-serif" font-size="12">haproxy (docker stats)</text>
-<text x="70" y="400" font-family="sans-serif" font-size="10">Indicative only: custom CPU is self-reported process_time(); HAProxy/wrk use docker stats. Different accounting models.</text>
+<text x="70" y="416" font-family="sans-serif" font-size="10">Indicative only: custom CPU is self-reported process_time(); HAProxy/wrk use docker stats. Different accounting models.</text>
 </svg>

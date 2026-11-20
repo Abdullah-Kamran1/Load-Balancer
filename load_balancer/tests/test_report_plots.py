@@ -13,6 +13,7 @@ def test_event_timeline_marks_kill_down_and_recovery_for_each_case():
     assert svg.startswith("<svg") and svg.endswith("</svg>")
     assert "custom-round_robin-50" in svg
     assert "kill" in svg and "DOWN" in svg and "UP" in svg
+    assert "after restart" in svg and "illustrative" in svg
     assert "158" in svg and "23460" in svg
     # one horizontal lifeline plus markers at kill / DOWN / load end / restart / UP
     assert svg.count("<circle") >= 5
@@ -20,15 +21,20 @@ def test_event_timeline_marks_kill_down_and_recovery_for_each_case():
 
 def test_cpu_comparison_groups_by_strategy_and_shows_the_caveat():
     medians = [
-        {"mode": "custom", "strategy": "round_robin", "clients": "50",
-         "lb_cpu_pct_mean": "84.3", "wrk_cpu_pct_mean": "5.3"},
-        {"mode": "haproxy", "strategy": "roundrobin", "clients": "50",
-         "lb_cpu_pct_mean": "164.6", "wrk_cpu_pct_mean": "33.6"},
+        {"mode": mode, "strategy": strategy, "clients": "50",
+         "lb_cpu_pct_mean": str(value), "wrk_cpu_pct_mean": "5.3"}
+        for mode, strategy, value in (
+            ("custom", "round_robin", 84.3), ("haproxy", "roundrobin", 164.6),
+            ("custom", "least_active_requests", 86.7), ("haproxy", "leastconn", 170.3),
+            ("custom", "ip_hash", 86.8), ("haproxy", "source", 56.3),
+        )
     ]
     svg = rp.cpu_comparison_svg(medians)
     assert svg.startswith("<svg")
-    assert svg.count("<rect") == 4  # 2 strategies x 2 implementations
-    assert "self-reported" in svg and "docker stats" in svg
+    assert svg.count("<rect") == 6  # 3 normalized groups x 2 implementations
+    assert 'height="0.0"' not in svg  # no fabricated zero-value bars
+    assert "round robin" in svg and "least active" in svg and "ip hash" in svg
+    assert "custom (self-reported)" in svg and "haproxy (docker stats)" in svg
     assert "Indicative only" in svg
 
 

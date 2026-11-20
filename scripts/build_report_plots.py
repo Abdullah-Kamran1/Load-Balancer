@@ -72,8 +72,8 @@ def event_timeline_svg(cases: list[dict]) -> str:
         kill = case["kill_at_s"]
         down = kill + case["detection_s"]
         end = case["duration_s"]
-        restart = end + 2
-        up = end + case["recovery_s"]
+        restart = end + 2  # raw timelines have no restart timestamp: illustrative
+        up = restart + case["recovery_s"]  # recovery_s is measured from restart
         out.append(
             f'<text x="20" y="{y+5}" font-family="sans-serif" font-size="12">'
             f'{html.escape(str(case["label"]))}</text>'
@@ -86,8 +86,8 @@ def event_timeline_svg(cases: list[dict]) -> str:
             (kill, f"kill t={kill:g}", "#d62728"),
             (down, f"DOWN +{case['detection_s']:g}s ({case['failed_detection']} 5xx)", "#ff7f0e"),
             (end, f"load end ({case['failed_after_kill_30s']} 5xx)", "#1f77b4"),
-            (restart, "restart", "#9467bd"),
-            (up, f"UP +{case['recovery_s']:g}s", "#2ca02c"),
+            (restart, "restart (illustrative +2s)", "#9467bd"),
+            (up, f"UP +{case['recovery_s']:g}s after restart", "#2ca02c"),
         ]
         for seconds, label, marker_color in markers:
             x = x_at(seconds)
@@ -106,10 +106,19 @@ def event_timeline_svg(cases: list[dict]) -> str:
 
 
 def cpu_comparison_svg(medians: list[dict]) -> str:
+    # Custom and HAProxy use different strategy names for the same intent;
+    # normalise the axis so each group has two real values (no fabricated 0).
+    aliases = {
+        "round_robin": "round robin", "roundrobin": "round robin",
+        "least_active_requests": "least active / leastconn",
+        "leastconn": "least active / leastconn",
+        "ip_hash": "ip hash / source", "source": "ip hash / source",
+    }
     groups: dict[str, dict[str, list[float]]] = {}
     for row in medians:
-        groups.setdefault(row["strategy"], {"custom": [], "haproxy": []})
-        groups[row["strategy"]][row["mode"]].append(float(row["lb_cpu_pct_mean"]))
+        label = aliases.get(row["strategy"], row["strategy"])
+        groups.setdefault(label, {"custom": [], "haproxy": []})
+        groups[label][row["mode"]].append(float(row["lb_cpu_pct_mean"]))
     strategies = sorted(groups)
     series = []
     for mode, color, label in (
@@ -124,7 +133,7 @@ def cpu_comparison_svg(medians: list[dict]) -> str:
         series.append((label, values, color))
     svg = bar_chart_svg("Mean LB CPU by algorithm (% of one core)", strategies, series)
     caveat = (
-        '<text x="70" y="400" font-family="sans-serif" font-size="10">'
+        '<text x="70" y="416" font-family="sans-serif" font-size="10">'
         'Indicative only: custom CPU is self-reported process_time(); HAProxy/wrk use'
         ' docker stats. Different accounting models.</text>'
     )

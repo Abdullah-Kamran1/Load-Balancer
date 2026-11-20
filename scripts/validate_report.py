@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 import re
 import sys
 from pathlib import Path
@@ -18,6 +19,34 @@ def linked_result_paths(text: str) -> list[str]:
     return LINK_RE.findall(text)
 
 
+def glance_figures(text: str) -> list[str]:
+    """Numeric cells of the results-at-a-glance table."""
+    if "## 2. Results at a glance" not in text:
+        return []
+    section = text.split("## 2. Results at a glance", 1)[1].split("## 3.", 1)[0]
+    figures = []
+    for line in section.splitlines():
+        if not line.startswith(("| custom", "| HAProxy")):
+            continue
+        for cell in line.split("|")[2:-1]:
+            token = cell.strip().replace(",", "").replace("%", "")
+            if re.fullmatch(r"\d+(?:\.\d+)?", token):
+                figures.append(token)
+    return figures
+
+
+def _known_values(repo_root: Path) -> set[float]:
+    values = set()
+    path = repo_root / "results" / "structured" / "report_data.csv"
+    if path.exists():
+        for row in csv.DictReader(path.read_text(encoding="utf-8").splitlines()):
+            try:
+                values.add(float(row["value"]))
+            except (TypeError, ValueError):
+                pass
+    return values
+
+
 def validate(report: Path, repo_root: Path) -> list[str]:
     text = report.read_text(encoding="utf-8")
     errors = []
@@ -31,6 +60,10 @@ def validate(report: Path, repo_root: Path) -> list[str]:
     for name in REQUIRED_PLOTS:
         if not (plots / name).exists():
             errors.append(f"missing required plot: {name}")
+    known = _known_values(repo_root)
+    for figure in glance_figures(text):
+        if float(figure) not in known:
+            errors.append(f"untraceable glance figure: {figure}")
     return errors
 
 

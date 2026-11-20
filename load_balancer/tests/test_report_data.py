@@ -92,7 +92,13 @@ def test_build_rows_derives_evenness_failure_and_keepalive_metrics(tmp_path):
         '{"proxy":{"counters":{"connections_total":50,"requests_total":59109}}}',
         encoding="utf-8",
     )
-    rows = br.build_rows(medians, failures, ka, close, snapshot, {})
+    ha_snapshot = tmp_path / "ha_snapshot.json"
+    ha_snapshot.write_text(
+        '{"proxy":{"counters":{"connections_total":11,"requests_total":11005}}}',
+        encoding="utf-8",
+    )
+    rows = br.build_rows(medians, failures, ka, close, snapshot, {},
+                         haproxy_snapshot=ha_snapshot)
     by_metric = {(r["metric"], r["mode"], r["strategy"]): r["value"] for r in rows}
     assert by_metric[("round_robin_evenness_pct", "custom", "round_robin")] == 0.0
     assert by_metric[("failure_detection_s", "custom", "round_robin")] == 4.7
@@ -101,3 +107,4 @@ def test_build_rows_derives_evenness_failure_and_keepalive_metrics(tmp_path):
     assert by_metric[("keepalive_p50_delta_ms", "custom", "keep_alive")] == 3.48
     assert round(by_metric[("requests_per_connection", "custom", "keep_alive")], 1) == 340.2
     assert round(by_metric[("snapshot_requests_per_connection", "custom", "persistent")], 0) == 1182
+    assert round(by_metric[("haproxy_snapshot_requests_per_connection", "haproxy", "persistent")], 2) == 1000.45

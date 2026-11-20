@@ -213,6 +213,7 @@ keepalive_rps_ratio,custom,keep_alive,,1.25,results/raw/phase3_wrk_keepalive.txt
 keepalive_p50_delta_ms,custom,keep_alive,,3.48,results/raw/phase3_wrk_keepalive.txt:load_balancer/tests/test_persistent_connection.py;results/raw/phase3_wrk_close.txt
 requests_per_connection,custom,keep_alive,,340.2,results/raw/phase3_wrk_keepalive.txt:load_balancer/tests/test_persistent_connection.py
 snapshot_requests_per_connection,custom,persistent,,1182.18,results/raw/custom_20261120-151537-custom-round_robin-50-r1_snapshot.json
+haproxy_snapshot_requests_per_connection,haproxy,persistent,,1000.45,results/raw/haproxy_snapshot_20261118-214416.json
 timeline_kill_at_s,,,,30,results/raw/failure_20261120-165926-custom-round_robin-50-r1.txt
 timeline_detection_s,,,,4.721,results/raw/failure_20261120-165926-custom-round_robin-50-r1.txt
 timeline_failed_detection,,,,158,results/raw/failure_20261120-165926-custom-round_robin-50-r1.txt

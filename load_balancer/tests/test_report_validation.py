@@ -28,6 +28,26 @@ def test_validate_detects_missing_artifacts_and_questions(tmp_path):
     assert any("question 2" in e for e in errors)
 
 
+def test_validate_detects_untraceable_glance_figure(tmp_path):
+    report = tmp_path / "report.md"
+    report.write_text(
+        "## 2. Results at a glance\n"
+        "| custom round robin | 943.07 | 12345.67 |\n"
+        "## 3. Answers\n"
+        + "".join(f"### {n}. Q\n" for n in range(1, 11)),
+        encoding="utf-8",
+    )
+    (tmp_path / "results" / "structured").mkdir(parents=True)
+    (tmp_path / "results" / "structured" / "report_data.csv").write_text(
+        "metric,mode,strategy,clients,value,evidence\n"
+        "rps_median,custom,round_robin,50,943.07,x\n",
+        encoding="utf-8",
+    )
+    errors = vr.validate(report, tmp_path)
+    assert any("12345.67" in e for e in errors)
+    assert not any("943.07" in e for e in errors)
+
+
 def test_tracked_final_report_validates():
     repo = Path(__file__).resolve().parents[2]
     assert vr.validate(repo / "docs" / "final_report.md", repo) == []
