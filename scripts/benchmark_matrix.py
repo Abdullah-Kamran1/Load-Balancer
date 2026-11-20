@@ -124,6 +124,20 @@ def select_cases(cases: list[Case], start: int = 1, limit: int = 0) -> list[Case
     return selected[:limit] if limit else selected
 
 
+def run_case_safe(case: Case, index: int, log_path: Path, **kwargs) -> str | None:
+    """Keep an unattended matrix going after one failed run."""
+    try:
+        return run_case(case, index, **kwargs)
+    except Exception as exc:  # noqa: BLE001 - one case must not abort 54 min of runs
+        append_row(
+            log_path,
+            ["case", "run_index", "error_type", "error"],
+            [case.slug, index, type(exc).__name__, str(exc)],
+        )
+        print(f"[{case.slug} r{index}] FAILED: {type(exc).__name__}: {exc}", flush=True)
+        return None
+
+
 def _bytes_to_mib(value: float, unit: str) -> float:
     unit = unit.upper().strip()
     factors = {"B": 1 / 1048576, "KB": 1 / 1024, "KIB": 1 / 1024,
@@ -463,10 +477,13 @@ def main() -> int:
         return 0
 
     ensure_farm()
+    error_log = RAW_DIR / "benchmark_errors.csv"
     for case in cases:
         for index in range(1, args.runs + 1):
-            run_case(case, index, phase=args.phase,
-                     duration_s=args.duration, warmup_s=args.warmup)
+            run_case_safe(
+                case, index, error_log, phase=args.phase,
+                duration_s=args.duration, warmup_s=args.warmup,
+            )
     return 0
 
 

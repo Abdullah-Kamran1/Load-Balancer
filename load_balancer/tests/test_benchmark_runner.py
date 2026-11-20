@@ -27,6 +27,19 @@ def test_build_cases_expands_every_mode_algorithm_and_load():
     assert {c.clients for c in cases} == {50, 200, 500}
 
 
+def test_run_case_safe_logs_and_continues(monkeypatch, tmp_path):
+    def boom(*args, **kwargs):
+        raise RuntimeError("wrk exploded")
+
+    monkeypatch.setattr(bm, "run_case", boom)
+    log = tmp_path / "errors.csv"
+    case = bm.build_cases()[0]
+    assert bm.run_case_safe(case, 2, log) is None
+    rows = list(csv.reader(log.read_text(encoding="utf-8").splitlines()))
+    assert rows[1][:3] == ["custom-round_robin-50", "2", "RuntimeError"]
+    assert "wrk exploded" in rows[1][3]
+
+
 def test_haproxy_case_carries_both_stats_proxy_names():
     case = next(
         c
