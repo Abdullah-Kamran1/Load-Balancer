@@ -40,3 +40,25 @@ def test_flow_overview_covers_all_states_and_pipelines():
     ]
     assert [token for token in required if token not in flow] == []
     assert flow.count("```mermaid") >= 2
+
+
+def test_runbook_documents_config_and_valid_commands():
+    import re
+
+    root = repo_root()
+    runbook = (root / "docs" / "RUNBOOK.md").read_text(encoding="utf-8")
+    config_text = (
+        (root / "load_balancer" / "config.py").read_text(encoding="utf-8")
+        + (root / "load_balancer" / "main.py").read_text(encoding="utf-8")
+    )
+    env_names = set(re.findall(r'"(LB_[A-Z_]+)"', config_text))
+    env_names.add("LB_BACKENDS")
+    assert [name for name in sorted(env_names) if name not in runbook] == []
+    defaults = re.findall(r'"(LB_[A-Z_]+)",\s*"([^"]*)"', config_text)
+    defaults.append(("LB_BACKENDS", "backend-1:127.0.0.1:8001"))
+    assert [value for _, value in defaults if f"`{value}`" not in runbook] == []
+    scripts = set(re.findall(r"scripts[\\/]([a-z_]+\.py)", runbook))
+    assert scripts
+    assert [name for name in sorted(scripts) if not (root / "scripts" / name).exists()] == []
+    for heading in ("Prerequisites", "Running", "Configuration", "Testing", "Troubleshooting"):
+        assert heading in runbook
